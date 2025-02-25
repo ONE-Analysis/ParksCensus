@@ -28,12 +28,11 @@ RESOLUTION = 30                 # target raster resolution
 
 # Cutoff date for CapitalProjects (only include projects completed on/after this date)
 cutoff_date_simple = "01/01/2020"
-
 CUTOFF_DATE = datetime.strptime(f"{cutoff_date_simple} 12:00:00 AM", "%m/%d/%Y %I:%M:%S %p")
 
-# Data dictionary for indices and webmap configuration
 analysis_buffer_ft = ANALYSIS_BUFFER_FT  # used in text descriptions
 
+# Data dictionary for indices and webmap configuration
 DATASET_INFO = {
     "Heat_Hazard_Index": {
         "alias": "HeatHaz",
@@ -81,15 +80,56 @@ DATASET_INFO = {
         "hex": "#6168C1"
     },
     "CapitalProjects": {
-        # List of fields from CapitalProjects to concatenate (for popup display)
         "concat_fields": ["Title", "Summary", "CurrentPha", "DesignPerc", "Procuremen", "Constructi", "Construc_4", "ProjectLia", "EstInvestment", "FundingSou"],
-        "est_total_field": "EstInvTotal"  # field name for summed investments
+        "est_total_field": "EstInvTotal"
     },
-    # Webmap layer configurations (colors, names, and opacities)
     "Webmap": {
         "2080_Stormwater": {"name": "2080 Stormwater Flooding", "hex": "#244489", "shallow_alpha": 0.5},
         "FEMA_FloodHaz": {"name": "FEMA Floodmap", "hex_1pct": "#75E1FF", "hex_0_2pct": "#BEE7FF"},
         "Summer_Temperature": {"name": "Summer Temperature", "color_ramp": {"start": "#C40A0A00", "end": "#C40A0A"}},
         "NYC_Parks": {"name": "NYC Parks", "hex": "#328232"}
     }
+}
+
+# Where your SVG icons live
+ICONS_DIR = os.path.join(INPUT_DIR, "icons")
+
+# Mapping from user-friendly name -> SVG filename
+INDEX_ICONS = {
+    "Heat Hazard": "heat_hazard.svg",
+    "Coastal Flood Hazard": "coastal_flood_hazard.svg",
+    "Stormwater Flood Hazard": "stormwater_flood_hazard.svg",
+    "Heat Vulnerability": "heat_vulnerability.svg",
+    "Flood Vulnerability": "flood_vulnerability.svg"
+}
+
+# Group the existing hazard/vulnerability indexes
+HAZARD_FACTORS = [
+    "Heat_Hazard_Index",
+    "Coastal_Flood_Hazard_Index",
+    "Stormwater_Flood_Hazard_Index"
+]
+
+VULNERABILITY_FACTORS = [
+    "Heat_Vulnerability_Index",
+    "Flood_Vulnerability_Index"
+]
+
+# Sub-indices for each hazard index
+HAZARD_SUBINDICES = {
+    "Heat_Hazard_Index": [],
+    "Coastal_Flood_Hazard_Index": [
+        ("500-year Coastal Flood (Inside)", "Cst_500_in"),
+        ("500-year Coastal Flood (Nearby)", "Cst_500_nr"),
+        ("100-year Coastal Flood (Inside)", "Cst_100_in"),
+        ("100-year Coastal Flood (Nearby)", "Cst_100_nr")
+    ],
+    "Stormwater_Flood_Hazard_Index": [
+        ("Shallow Stormwater Flood (Inside)", "StrmShl_in"),
+        ("Shallow Stormwater Flood (Nearby)", "StrmShl_nr"),
+        ("Deep Stormwater Flood (Inside)", "StrmDp_in"),
+        ("Deep Stormwater Flood (Nearby)", "StrmDp_nr"),
+        ("Tidal Stormwater Flood (Inside)", "StrmTid_in"),
+        ("Tidal Stormwater Flood (Nearby)", "StrmTid_nr")
+    ]
 }

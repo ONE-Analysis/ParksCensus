@@ -9,10 +9,18 @@ from rasterio.enums import Resampling
 from pathlib import Path
 
 from config import (
-    OUTPUT_GEOJSON, OUTPUT_WEBMAP, DATASET_INFO, 
-    CUTOFF_DATE, cutoff_date_simple, 
-    HEAT_FILE, FEMA_RASTER, STORM_RASTER, OUTPUT_DIR
+    cutoff_date_simple,
+    DATASET_INFO,
+    ICONS_DIR,
+    INDEX_ICONS,
+    HAZARD_FACTORS,
+    VULNERABILITY_FACTORS,
+    HAZARD_SUBINDICES,
+    OUTPUT_DIR,
+    OUTPUT_GEOJSON,
+    OUTPUT_WEBMAP
 )
+
 # Column -> Alias mapping for the Capital Projects table:
 FIELD_ALIASES = {
     "Title": "Project",
@@ -118,216 +126,271 @@ def create_downsampled_raster(input_raster, output_raster, scale_factor=0.1):
 
 def generate_feature_html(properties):
     """
-    Builds an HTML string for the popup, including:
-      - Park Name (signname)
-      - EstInvTotal with formatting and line break
-      - A capital projects table with the columns in PROJECT_FIELDS (one row per project),
-        using FIELD_ALIASES for column headers, and removing signname from Title.
-      - A comprehensive Hazard & Vulnerability table showing all raw and index values
-      - The Capital Projects table is scrollable if > 2 rows.
+    Popup layout:
+      1) Park name at top
+      2) 'Estimated Recent Investments' bubble
+         - inside it, a hover-to-open dropdown for 'Recent Capital Projects'
+      3) 'Climate Risk Factor' bubble
+         - inside it, a single hover-to-open dropdown for 'Hazard'
+           (Vulnerability is omitted, since it has no sub-indices and we don't want it in the popup)
+         - plus the 5 icons (3 hazards + 2 vulnerabilities) in two rows below the main statistic
     """
-    # Park name
+
+    # --- Inline CSS/JS for hover-based <details> toggling and arrow rotation ---
+    style_and_script = """
+    <style>
+    .hover-details summary::-webkit-details-marker {
+      display: none; /* Hide the default triangle marker in Chrome/Safari */
+    }
+    .hover-details .dropdown-icon {
+      transition: transform 0.3s;
+    }
+    .hover-details[open] .dropdown-icon {
+      transform: rotate(180deg);
+    }
+    </style>
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      // Convert <details.hover-details> to hover-based open/close
+      document.querySelectorAll('.hover-details').forEach(function(el) {
+        let summary = el.querySelector('summary');
+        // Prevent default click toggle
+        if (summary) {
+          summary.addEventListener('click', function(e) {
+            e.preventDefault();
+          });
+        }
+        el.addEventListener('mouseenter', function() {
+          el.setAttribute('open', '');
+        });
+        el.addEventListener('mouseleave', function() {
+          el.removeAttribute('open');
+        });
+      });
+    });
+    </script>
+    """
+
+    # --- Park name ---
     park_name = properties.get("signname", "Unknown Park")
 
-    # Format the total investment with commas
+    # --- Estimated Investments ---
     raw_total = properties.get("EstInvTotal", "0")
     formatted_total = format_est_inv_total(raw_total)
 
-    # Prepare lists for each project column
+    # --- Prepare Capital Projects (for the nested hover dropdown) ---
     project_columns = {}
     for f in PROJECT_FIELDS:
         project_columns[f] = parse_splitted(properties, f)
-
-    # Determine how many projects (max length across all columns)
     num_projects = max(len(lst) for lst in project_columns.values()) if project_columns else 0
 
-    # Remove signname from Title entries
+    # Clean up Titles by removing park name
     if "Title" in project_columns:
         project_columns["Title"] = [
             remove_signname_from_title(t, park_name) for t in project_columns["Title"]
         ]
 
-    # Build the HTML
-    html = []
-    # Park name as a heading
-    html.append(f"<h3 style='margin-bottom:0.2em;'>{park_name}</h3>")
-    # Estimated Recent Investment on a new line, with cutoff date
-    html.append(
-        f"<p style='margin-top:0;'>Estimated Recent Investment:<br>"
-        f"<b>${formatted_total}</b> (since {cutoff_date_simple})</p>"
-    )
-
-    # Capital Projects table
     if num_projects > 0:
-        html.append("<h4 style='margin-top:1em;'>Capital Projects</h4>")
-
-        # If more than 2 projects, wrap the table in a scrollable container
-        if num_projects > 2:
-            html.append("<div style='max-height:200px; overflow-y:auto;'>")
-
-        html.append("<table border='1' style='border-collapse:collapse; font-size:12px; text-align:left;'>")
-        # Table header
-        html.append("<thead><tr>")
+        # Build a small table for projects
+        table_html = []
+        table_html.append("<table style='width:100%; border-collapse:collapse; font-size:12px;'>")
+        table_html.append("<thead><tr>")
         for col_name in PROJECT_FIELDS:
             alias = FIELD_ALIASES.get(col_name, col_name)
-            html.append(f"<th style='background:#f0f0f0; padding:4px;'>{alias}</th>")
-        html.append("</tr></thead>")
-        html.append("<tbody>")
-        # One row per project
+            table_html.append(f"<th style='background:#eee; padding:4px; font-weight:bold;'>{alias}</th>")
+        table_html.append("</tr></thead><tbody>")
         for i in range(num_projects):
-            html.append("<tr>")
+            table_html.append("<tr>")
             for col_name in PROJECT_FIELDS:
-                col_values = project_columns[col_name]
-                val = col_values[i] if i < len(col_values) else ""
-                html.append(f"<td style='padding:4px;'>{val}</td>")
-            html.append("</tr>")
-        html.append("</tbody></table>")
-
-        if num_projects > 2:
-            html.append("</div>")  # close scrollable container
+                val = project_columns[col_name][i] if i < len(project_columns[col_name]) else ""
+                table_html.append(f"<td style='padding:4px;'>{val}</td>")
+            table_html.append("</tr>")
+        table_html.append("</tbody></table>")
+        projects_content = "".join(table_html)
     else:
-        html.append("<p>No recent capital projects.</p>")
+        projects_content = "<p style='margin:0;'>No recent capital projects.</p>"
 
-    # Enhanced Hazard & Vulnerability table with ALL raw and index values
-    html.append("<h4 style='margin-top:1em;'>Hazard & Vulnerability</h4>")
-    
-    # Main indices table
-    html.append("<table border='1' style='border-collapse:collapse; font-size:12px; text-align:left; width:100%;'>")
-    html.append("<thead><tr>")
-    html.append("<th style='background:#f0f0f0; padding:4px;'>Index</th>")
-    html.append("<th style='background:#f0f0f0; padding:4px;'>Raw Value</th>")
-    html.append("<th style='background:#f0f0f0; padding:4px;'>Index Value</th>")
-    html.append("</tr></thead>")
-    html.append("<tbody>")
-    
-    # Define index to dataset mapping
-    index_to_dataset = {
-        "HeatHaz": "Heat_Hazard_Index",
-        "CoastalFloodHaz": "Coastal_Flood_Hazard_Index",
-        "StormFloodHaz": "Stormwater_Flood_Hazard_Index",
-        "HeatVuln": "Heat_Vulnerability_Index",
-        "FloodVuln": "Flood_Vulnerability_Index"
-    }
-    
-    # Add a row for each main hazard/vulnerability index
-    for index_field in HAZARD_FIELDS:
-        if index_field in properties:
-            # Get the dataset information
-            dataset_key = index_to_dataset.get(index_field)
-            if dataset_key in DATASET_INFO:
-                dataset = DATASET_INFO[dataset_key]
-                raw_field = dataset.get("raw")
-                raw_value = properties.get(raw_field, "N/A")
-                index_value = properties.get(index_field, "N/A")
-                
-                # Format raw values with appropriate precision
-                if isinstance(raw_value, (int, float)):
-                    if dataset_key == "Heat_Hazard_Index":
-                        raw_value = f"{raw_value:.1f}°F"
-                    else:
-                        raw_value = f"{raw_value:.2f}"
-                
-                # Format index values
-                if isinstance(index_value, (int, float)):
-                    index_value = f"{index_value:.2f}"
-                
-                # Add row to table
-                html.append("<tr>")
-                html.append(f"<td style='padding:4px;'>{dataset.get('name', index_field)}</td>")
-                html.append(f"<td style='padding:4px;'>{raw_value}</td>")
-                html.append(f"<td style='padding:4px;'>{index_value}</td>")
-                html.append("</tr>")
-    
-    html.append("</tbody></table>")
-    
-    # Add a separate detailed table for all flood components
-    html.append("<h5 style='margin-top:1em;'>Detailed Flood Components</h5>")
-    html.append("<div style='max-height:300px; overflow-y:auto;'>")
-    html.append("<table border='1' style='border-collapse:collapse; font-size:12px; text-align:left; width:100%;'>")
-    html.append("<thead><tr>")
-    html.append("<th style='background:#f0f0f0; padding:4px;'>Component</th>")
-    html.append("<th style='background:#f0f0f0; padding:4px;'>Within Site (%)</th>")
-    html.append("<th style='background:#f0f0f0; padding:4px;'>Nearby (%)</th>")
-    html.append("</tr></thead>")
-    html.append("<tbody>")
-    
-    # Coastal Flood Components
-    html.append("<tr>")
-    html.append("<td colspan='3' style='background:#e0e0e0; padding:4px; font-weight:bold;'>Coastal Flood Components</td>")
-    html.append("</tr>")
-    
-    # 500-year Coastal Flood
-    in_val = properties.get("Cst_500_in", "N/A")
-    nr_val = properties.get("Cst_500_nr", "N/A")
-    if isinstance(in_val, (int, float)):
-        in_val = f"{in_val * 100:.1f}%"
-    if isinstance(nr_val, (int, float)):
-        nr_val = f"{nr_val * 100:.1f}%"
-    html.append("<tr>")
-    html.append("<td style='padding:4px;'>500-year Coastal Flood</td>")
-    html.append(f"<td style='padding:4px;'>{in_val}</td>")
-    html.append(f"<td style='padding:4px;'>{nr_val}</td>")
-    html.append("</tr>")
-    
-    # 100-year Coastal Flood
-    in_val = properties.get("Cst_100_in", "N/A")
-    nr_val = properties.get("Cst_100_nr", "N/A")
-    if isinstance(in_val, (int, float)):
-        in_val = f"{in_val * 100:.1f}%"
-    if isinstance(nr_val, (int, float)):
-        nr_val = f"{nr_val * 100:.1f}%"
-    html.append("<tr>")
-    html.append("<td style='padding:4px;'>100-year Coastal Flood</td>")
-    html.append(f"<td style='padding:4px;'>{in_val}</td>")
-    html.append(f"<td style='padding:4px;'>{nr_val}</td>")
-    html.append("</tr>")
-    
-    # Stormwater Components
-    html.append("<tr>")
-    html.append("<td colspan='3' style='background:#e0e0e0; padding:4px; font-weight:bold;'>Stormwater Components</td>")
-    html.append("</tr>")
-    
-    # Shallow Stormwater
-    in_val = properties.get("StrmShl_in", "N/A")
-    nr_val = properties.get("StrmShl_nr", "N/A")
-    if isinstance(in_val, (int, float)):
-        in_val = f"{in_val * 100:.1f}%"
-    if isinstance(nr_val, (int, float)):
-        nr_val = f"{nr_val * 100:.1f}%"
-    html.append("<tr>")
-    html.append("<td style='padding:4px;'>Shallow Stormwater</td>")
-    html.append(f"<td style='padding:4px;'>{in_val}</td>")
-    html.append(f"<td style='padding:4px;'>{nr_val}</td>")
-    html.append("</tr>")
-    
-    # Deep Stormwater
-    in_val = properties.get("StrmDp_in", "N/A")
-    nr_val = properties.get("StrmDp_nr", "N/A")
-    if isinstance(in_val, (int, float)):
-        in_val = f"{in_val * 100:.1f}%"
-    if isinstance(nr_val, (int, float)):
-        nr_val = f"{nr_val * 100:.1f}%"
-    html.append("<tr>")
-    html.append("<td style='padding:4px;'>Deep Stormwater</td>")
-    html.append(f"<td style='padding:4px;'>{in_val}</td>")
-    html.append(f"<td style='padding:4px;'>{nr_val}</td>")
-    html.append("</tr>")
-    
-    # Tidal Stormwater
-    in_val = properties.get("StrmTid_in", "N/A")
-    nr_val = properties.get("StrmTid_nr", "N/A")
-    if isinstance(in_val, (int, float)):
-        in_val = f"{in_val * 100:.1f}%"
-    if isinstance(nr_val, (int, float)):
-        nr_val = f"{nr_val * 100:.1f}%"
-    html.append("<tr>")
-    html.append("<td style='padding:4px;'>Tidal Stormwater</td>")
-    html.append(f"<td style='padding:4px;'>{in_val}</td>")
-    html.append(f"<td style='padding:4px;'>{nr_val}</td>")
-    html.append("</tr>")
-    
-    html.append("</tbody></table>")
-    html.append("</div>")
+    # --- "Estimated Investments" bubble, with nested hover-details for Projects ---
+    investments_bubble = f"""
+    <div style="
+        border:1px solid #ddd; 
+        background-color:#f0f0f0; 
+        border-radius:12px; 
+        margin-bottom:10px; 
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
+        padding:10px;">
+      <p style="margin:0; font-size:16px;">
+        <span style="font-weight:normal;">Estimated Recent Investments:</span><br>
+        <span style="font-weight:bold;">${formatted_total}</span> (since {cutoff_date_simple})
+      </p>
+
+      <!-- Nested hover-to-open dropdown for Recent Capital Projects -->
+      <details class="hover-details" style="
+          border:1px solid #ccc;
+          border-radius:8px;
+          margin-top:10px;
+          background-color:#eaeaea;
+          overflow:hidden;">
+        <summary style="
+            font-size:14px; 
+            cursor:pointer; 
+            padding:8px; 
+            margin:0; 
+            display:flex; 
+            justify-content:space-between; 
+            align-items:center;">
+          <span>Recent Capital Projects</span>
+          <span class="dropdown-icon" style="font-weight:bold;">▼</span>
+        </summary>
+        <div style="padding:8px;">
+          {projects_content}
+        </div>
+      </details>
+    </div>
+    """
+
+    # --- Climate Risk Factor (non-collapsible bubble) ---
+    climate_risk = properties.get("ClimateRiskFactor", "N/A")
+
+    # Helper to build a table for hazard factors only
+    def build_hazard_table(properties):
+        rows = []
+        for fk in HAZARD_FACTORS:
+            info = DATASET_INFO.get(fk, {})
+            alias = info.get("alias", "N/A")
+            raw_field = info.get("raw", "")
+            name = info.get("name", fk)
+            suffix = info.get("suffix", "")
+
+            raw_val = properties.get(raw_field, "N/A")
+            idx_val = properties.get(alias, "N/A")
+
+            # Format numeric
+            if isinstance(raw_val, (int, float)):
+                raw_val = f"{raw_val:.2f}{suffix}"
+            if isinstance(idx_val, (int, float)):
+                idx_val = f"{idx_val:.2f}"
+
+            # Main row
+            rows.append(f"""
+            <tr>
+              <td style="padding:4px; font-weight:bold;">{name}</td>
+              <td style="padding:4px;">{raw_val}</td>
+              <td style="padding:4px;">{idx_val}</td>
+            </tr>
+            """)
+
+            # Sub‐indices for each hazard factor
+            sublist = HAZARD_SUBINDICES.get(fk, [])
+            for (sub_label, sub_key) in sublist:
+                val = properties.get(sub_key, "N/A")
+                if isinstance(val, (int, float)):
+                    val = f"{val:.2f}"
+                rows.append(f"""
+                <tr>
+                  <td style="padding:4px; padding-left:20px;">{sub_label}</td>
+                  <td style="padding:4px;">{val}</td>
+                  <td style="padding:4px;">N/A</td>
+                </tr>
+                """)
+
+        return f"""
+        <table style="width:100%; border-collapse:collapse; font-size:12px;">
+          <thead>
+            <tr>
+              <th style="background:#eee; padding:4px;">Hazard Factor</th>
+              <th style="background:#eee; padding:4px;">Raw Value</th>
+              <th style="background:#eee; padding:4px;">Index Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(rows)}
+          </tbody>
+        </table>
+        """
+
+    hazard_table_html = build_hazard_table(properties)
+
+    hazard_dropdown = f"""
+    <details class="hover-details" style="
+        border:1px solid #ccc;
+        border-radius:8px;
+        margin-top:10px;
+        background-color:#eaeaea;
+        overflow:hidden;">
+      <summary style="
+          font-size:14px; 
+          cursor:pointer; 
+          padding:8px; 
+          margin:0; 
+          display:flex; 
+          justify-content:space-between; 
+          align-items:center;">
+        <span>Hazard</span>
+        <span class="dropdown-icon" style="font-weight:bold;">▼</span>
+      </summary>
+      <div style="padding:8px;">
+        {hazard_table_html}
+      </div>
+    </details>
+    """
+
+    # The five icons below the main Climate Risk Factor statistic, 3 on top row, 2 on bottom row
+    icons_html = f"""
+    <div style="margin-top:10px;">
+      <!-- Top row: Heat Hazard, Coastal Flood Hazard, Stormwater Flood Hazard -->
+      <div style="display: flex; justify-content: center; gap: 20px; margin-bottom: 10px;">
+        <div style="text-align:center;">
+          <img src="{ICONS_DIR}/{INDEX_ICONS['Heat Hazard']}" style="width:50px; height:auto;" />
+          <div style="font-size:12px; margin-top:4px;">Heat Hazard</div>
+        </div>
+        <div style="text-align:center;">
+          <img src="{ICONS_DIR}/{INDEX_ICONS['Coastal Flood Hazard']}" style="width:50px; height:auto;" />
+          <div style="font-size:12px; margin-top:4px;">Coastal Flood Hazard</div>
+        </div>
+        <div style="text-align:center;">
+          <img src="{ICONS_DIR}/{INDEX_ICONS['Stormwater Flood Hazard']}" style="width:50px; height:auto;" />
+          <div style="font-size:12px; margin-top:4px;">Stormwater Flood Hazard</div>
+        </div>
+      </div>
+      <!-- Bottom row: Heat Vulnerability, Flood Vulnerability -->
+      <div style="display: flex; justify-content: center; gap: 20px;">
+        <div style="text-align:center;">
+          <img src="{ICONS_DIR}/{INDEX_ICONS['Heat Vulnerability']}" style="width:50px; height:auto;" />
+          <div style="font-size:12px; margin-top:4px;">Heat Vulnerability</div>
+        </div>
+        <div style="text-align:center;">
+          <img src="{ICONS_DIR}/{INDEX_ICONS['Flood Vulnerability']}" style="width:50px; height:auto;" />
+          <div style="font-size:12px; margin-top:4px;">Flood Vulnerability</div>
+        </div>
+      </div>
+    </div>
+    """
+
+    climate_bubble = f"""
+    <div style="
+        border:1px solid #ddd; 
+        background-color:#f0f0f0; 
+        border-radius:12px; 
+        margin-bottom:10px; 
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
+        padding:10px;">
+      <p style="margin:0; font-size:16px;">
+        <span style="font-weight:normal;">Climate Risk Factor:</span><br>
+        <span style="font-weight:bold;">{climate_risk}</span>
+      </p>
+      <!-- Only Hazard dropdown is shown; no Vulnerability dropdown -->
+      {hazard_dropdown}
+      {icons_html}
+    </div>
+    """
+
+    # --- Combine everything ---
+    html = []
+    html.append(style_and_script)  # Inline <style> + <script> for hover-based details
+    html.append(f'<h3 style="margin-bottom:0.2em; font-size:22px; font-weight:bold;">{park_name}</h3>')
+    html.append(investments_bubble)
+    html.append(climate_bubble)
 
     return "".join(html)
 
@@ -339,90 +402,104 @@ def style_function(feature):
         "fillOpacity": 0.6,
     }
 
-def raster_to_png(input_raster, output_png, colormap=None):
-    """
-    Convert a single-band raster to a PNG image with appropriate colormap
-    """
+def hex_to_rgba(hex_color, alpha=255):
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) == 6:
+        r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    elif len(hex_color) == 3:
+        r, g, b = tuple(int(hex_color[i]*2, 16) for i in range(3))
+    else:
+        r, g, b = (0, 0, 0)
+    return (r, g, b, alpha)
+
+def raster_to_png(input_raster, output_png, colormap=None, raster_type=None):
     import numpy as np
     from PIL import Image
-    
+    import rasterio
+    from config import DATASET_INFO
+
     with rasterio.open(input_raster) as src:
-        # Read the data
         data = src.read(1)
         nodata = src.nodata
-        
-        # Create a mask for valid data
-        if nodata is not None:
-            mask = (data != nodata)
+    if nodata is not None:
+        mask = (data != nodata)
+    else:
+        mask = (data != 0)
+    height, width = data.shape
+    rgba = np.zeros((height, width, 4), dtype=np.uint8)
+    
+    if colormap == "heat":
+        if data[mask].size > 0:
+            if data.max() > 200:  # likely in Kelvin
+                data_f = (data - 273.15) * 9/5 + 32
+            else:
+                data_f = data
+            min_temp = np.percentile(data_f[mask], 1)
+            max_temp = np.percentile(data_f[mask], 99)
+            norm = np.clip((data_f - min_temp) / (max_temp - min_temp), 0, 1)
+            for i in range(height):
+                for j in range(width):
+                    if mask[i, j]:
+                        t = norm[i, j]
+                        if t < 0.33:
+                            rgba[i, j, :] = [0, int(255 * t * 3), int(255 * (0.33 + t * 2)), 200]
+                        elif t < 0.66:
+                            rgba[i, j, :] = [int(255 * (t - 0.33) * 3), 255, int(255 * (1 - (t - 0.33) * 3)), 200]
+                        else:
+                            rgba[i, j, :] = [255, int(255 * (1 - (t - 0.66) * 3)), 0, 200]
+    elif colormap == "flood":
+        if raster_type == "FEMA":
+            color_1pct = hex_to_rgba(DATASET_INFO["Webmap"]["FEMA_FloodHaz"]["hex_1pct"], alpha=200)
+            color_0_2pct = hex_to_rgba(DATASET_INFO["Webmap"]["FEMA_FloodHaz"]["hex_0_2pct"], alpha=200)
+            for i in range(height):
+                for j in range(width):
+                    if mask[i, j]:
+                        val = data[i, j]
+                        if val == 1:
+                            rgba[i, j, :] = color_1pct
+                        elif val == 2:
+                            rgba[i, j, :] = color_0_2pct
+                        else:
+                            rgba[i, j, 3] = 0
+        elif raster_type == "Stormwater":
+            storm_hex = DATASET_INFO["Webmap"]["2080_Stormwater"]["hex"]
+            shallow_alpha = DATASET_INFO["Webmap"]["2080_Stormwater"].get("shallow_alpha", 0.5)
+            base_color = hex_to_rgba(storm_hex, alpha=255)
+            for i in range(height):
+                for j in range(width):
+                    if mask[i, j]:
+                        val = data[i, j]
+                        if val == 1:
+                            alpha = int(shallow_alpha * 255)
+                        elif val == 2:
+                            alpha = int(0.7 * 255)
+                        elif val == 3:
+                            alpha = int(0.9 * 255)
+                        else:
+                            alpha = 0
+                        rgba[i, j, :] = [base_color[0], base_color[1], base_color[2], alpha]
         else:
-            mask = (data != 0)  # Assuming 0 is nodata if not specified
-        
-        # Create an RGBA array (initialize with transparent)
-        height, width = data.shape
-        rgba = np.zeros((height, width, 4), dtype=np.uint8)
-        
-        # Apply colormap based on the type
-        if colormap == "heat":
-            # For temperature data - create a blue to red temperature map
-            if data[mask].size > 0:  # Check if we have valid data
-                # Kelvin to Fahrenheit conversion
-                if data.max() > 200:  # Likely in Kelvin
-                    data_f = (data - 273.15) * 9/5 + 32
-                else:
-                    data_f = data  # Assume already in appropriate scale
-                
-                # Min-max temperature range for normalization
-                min_temp = np.percentile(data_f[mask], 1)  # 1st percentile to avoid outliers
-                max_temp = np.percentile(data_f[mask], 99)  # 99th percentile to avoid outliers
-                
-                # Normalize to 0-1 scale
-                norm = np.clip((data_f - min_temp) / (max_temp - min_temp), 0, 1)
-                
-                # Apply custom colormap (cool to hot)
-                for i in range(height):
-                    for j in range(width):
-                        if mask[i, j]:
-                            t = norm[i, j]
-                            if t < 0.33:  # Cool (blue to cyan)
-                                rgba[i, j, 0] = 0
-                                rgba[i, j, 1] = int(255 * t * 3)
-                                rgba[i, j, 2] = int(255 * (0.33 + t * 2))
-                                rgba[i, j, 3] = 200  # Semi-transparent
-                            elif t < 0.66:  # Moderate (cyan to yellow)
-                                rgba[i, j, 0] = int(255 * (t - 0.33) * 3)
-                                rgba[i, j, 1] = 255
-                                rgba[i, j, 2] = int(255 * (1 - (t - 0.33) * 3))
-                                rgba[i, j, 3] = 200
-                            else:  # Hot (yellow to red)
-                                rgba[i, j, 0] = 255
-                                rgba[i, j, 1] = int(255 * (1 - (t - 0.66) * 3))
-                                rgba[i, j, 2] = 0
-                                rgba[i, j, 3] = 200
-        
-        elif colormap == "flood":
-            # For flood data - blue colormap
             if data[mask].size > 0:
-                # Normalize to 0-1 scale
                 if data[mask].max() > data[mask].min():
                     norm = np.clip((data - data[mask].min()) / (data[mask].max() - data[mask].min()), 0, 1)
                 else:
                     norm = np.zeros_like(data)
-                
-                # Apply blue colormap with higher opacity for higher values
                 for i in range(height):
                     for j in range(width):
                         if mask[i, j] and norm[i, j] > 0:
                             rgba[i, j, 0] = 0
-                            rgba[i, j, 1] = int(100 + 155 * norm[i, j])  # Light to dark blue
+                            rgba[i, j, 1] = int(100 + 155 * norm[i, j])
                             rgba[i, j, 2] = int(255 - 100 * norm[i, j])
-                            rgba[i, j, 3] = int(100 + 155 * norm[i, j])  # More opaque for higher values
-        
-        # Create PIL image from RGBA array
-        img = Image.fromarray(rgba)
-        
-        # Save as PNG
-        img.save(output_png)
+                            rgba[i, j, 3] = int(100 + 155 * norm[i, j])
+    else:
+        for i in range(height):
+            for j in range(width):
+                if mask[i, j]:
+                    val = int(255 * (data[i, j] / data.max()))
+                    rgba[i, j, :] = [val, val, val, 255]
     
+    img = Image.fromarray(rgba)
+    img.save(output_png)
     return output_png
 
 def style_function(feature):
@@ -444,42 +521,33 @@ def generate_webmap():
     # Create downsampled versions of rasters
     scale_factor = 0.1  # Using 10% of original size
     
-    # Process heat raster
     heat_small = os.path.join(web_dir, "heat_small.tif")
     heat_png = os.path.join(web_dir, "heat.png")
     if not os.path.exists(heat_png):
         create_downsampled_raster(HEAT_FILE, heat_small, scale_factor)
         raster_to_png(heat_small, heat_png, colormap="heat")
     
-    # Process FEMA raster
     fema_small = os.path.join(web_dir, "fema_small.tif")
     fema_png = os.path.join(web_dir, "fema.png")
     if not os.path.exists(fema_png):
         create_downsampled_raster(FEMA_RASTER, fema_small, scale_factor)
-        raster_to_png(fema_small, fema_png, colormap="flood")
+        raster_to_png(fema_small, fema_png, colormap="flood", raster_type="FEMA")
     
-    # Process storm raster
     storm_small = os.path.join(web_dir, "storm_small.tif")
     storm_png = os.path.join(web_dir, "storm.png")
     if not os.path.exists(storm_png):
         create_downsampled_raster(STORM_RASTER, storm_small, scale_factor)
-        raster_to_png(storm_small, storm_png, colormap="flood")
+        raster_to_png(storm_small, storm_png, colormap="flood", raster_type="Stormwater")
     
-    # Load the output GeoJSON with GeoPandas and reproject to EPSG:4326 (WGS84)
     gdf = gpd.read_file(OUTPUT_GEOJSON)
     gdf = gdf.to_crs(epsg=4326)
-    
-    # Add a column "popup_html" for each park
     gdf["popup_html"] = gdf.apply(lambda row: generate_feature_html(row.to_dict()), axis=1)
     
-    # Calculate NYC bounds from parks data
     minx, miny, maxx, maxy = gdf.total_bounds
     nyc_bounds = [[miny, minx], [maxy, maxx]]
     
-    # Convert to GeoJSON text
     geojson_data = gdf.to_json()
     
-    # Create a folium GeoJsonPopup referencing the "popup_html" field
     popup = folium.GeoJsonPopup(
         fields=["popup_html"],
         aliases=[None],
@@ -488,7 +556,6 @@ def generate_webmap():
         localize=True
     )
     
-    # Create the GeoJson layer with style and that popup
     folium.GeoJson(
         data=geojson_data,
         name="NYC Parks",
@@ -496,7 +563,6 @@ def generate_webmap():
         popup=popup
     ).add_to(m)
     
-    # Add raster layers as image overlays
     heat_config = DATASET_INFO["Webmap"]["Summer_Temperature"]
     folium.raster_layers.ImageOverlay(
         image=heat_png,
@@ -524,10 +590,8 @@ def generate_webmap():
         show=False
     ).add_to(m)
     
-    # Add layer control
     folium.LayerControl().add_to(m)
     
-    # Add JavaScript to show/hide layers based on zoom level
     min_zoom_level = 13
     script = f"""
     <script>
@@ -536,7 +600,6 @@ def generate_webmap():
         var femaLayer = document.querySelector('img[alt="{fema_config["name"]}"]');
         var stormLayer = document.querySelector('img[alt="{storm_config["name"]}"]');
         
-        // Set initial visibility based on zoom level
         function updateVisibility() {{
             var currentZoom = map.getZoom();
             var showLayers = currentZoom >= {min_zoom_level};
@@ -552,17 +615,12 @@ def generate_webmap():
             }}
         }}
         
-        // Update visibility on zoom change
         map.on('zoomend', updateVisibility);
-        
-        // Set initial visibility
         updateVisibility();
     </script>
     """
     
-    # Add the JavaScript to the map
     m.get_root().html.add_child(folium.Element(script))
-    # Add a legend for the heat layer
     legend_html = """
     <div id="heat-legend" style="display:none; position: fixed; bottom: 50px; right: 50px; z-index:9999; background: white; padding: 10px; border: 1px solid grey; border-radius: 5px;">
         <h4 style="margin-top:0;">Summer Temperature</h4>
@@ -587,7 +645,6 @@ def generate_webmap():
     </div>
     """
     
-    # Add JavaScript to toggle the appropriate legend based on active layer
     legend_script = """
     <script>
         var map = document.querySelector('.folium-map').map;
@@ -598,14 +655,12 @@ def generate_webmap():
         var floodLegend = document.getElementById('flood-legend');
         
         function updateLegends() {
-            // Check if heat layer is visible
             if (heatLayer && map.hasLayer(heatLayer._layer) && 
                 window.getComputedStyle(heatLayer).opacity > 0 && 
                 window.getComputedStyle(heatLayer).display !== 'none') {
                 heatLegend.style.display = 'block';
                 floodLegend.style.display = 'none';
             }
-            // Check if flood layers are visible
             else if ((femaLayer && map.hasLayer(femaLayer._layer) && 
                       window.getComputedStyle(femaLayer).opacity > 0 && 
                       window.getComputedStyle(femaLayer).display !== 'none') ||
@@ -621,21 +676,14 @@ def generate_webmap():
             }
         }
         
-        // Update on layer add/remove
         map.on('overlayadd', updateLegends);
         map.on('overlayremove', updateLegends);
-        
-        // Update on zoom change (because we show/hide based on zoom)
         map.on('zoomend', updateLegends);
-        
-        // Initial update
         setTimeout(updateLegends, 1000);
     </script>
     """
     
-    # Add the legend HTML and script
     m.get_root().html.add_child(folium.Element(legend_html + legend_script))
-
     m.save(OUTPUT_WEBMAP)
     print("Webmap generated and saved to:", OUTPUT_WEBMAP)
 
