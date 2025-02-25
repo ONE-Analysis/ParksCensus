@@ -24,14 +24,16 @@ from config import (
 # ---------------------------
 # Utility Functions
 # ---------------------------
-def min_max_normalize(series):
-    """Normalize a pandas Series to range [0,1]."""
+def min_max_normalize(series, outlier_percentile=5):
+    """Normalize a pandas Series to range [0,1], omitting outliers."""
     s = series.fillna(0).astype(float)
-    s_min = s.min()
-    s_max = s.max()
-    if s_max - s_min == 0:
-        return s.apply(lambda x: 0.0 if s_max == 0 else 1.0)
-    return (s - s_min) / (s_max - s_min)
+    lower = s.quantile(outlier_percentile / 100)
+    upper = s.quantile(1 - outlier_percentile / 100)
+    
+    if upper - lower == 0:
+        return s.apply(lambda x: 0.0 if upper == 0 else 1.0)
+    
+    return (s.clip(lower=lower, upper=upper) - lower) / (upper - lower)
 
 def compute_index_for_factor_high(gdf, factor_name, config):
     info = config.DATASET_INFO[factor_name]
@@ -40,16 +42,6 @@ def compute_index_for_factor_high(gdf, factor_name, config):
     if raw_col not in gdf.columns:
         gdf[raw_col] = 0.0
     gdf[index_col] = min_max_normalize(gdf[raw_col])
-    return gdf
-
-def compute_index_for_factor_low(gdf, factor_name, config):
-    info = config.DATASET_INFO[factor_name]
-    raw_col = info["raw"]
-    index_col = info["alias"]
-    if raw_col not in gdf.columns:
-        gdf[raw_col] = 0.0
-    normalized = min_max_normalize(gdf[raw_col])
-    gdf[index_col] = 1 - normalized
     return gdf
 
 def ensure_crs_vector(gdf, target_crs):
@@ -172,6 +164,11 @@ def aggregate_cap_proj_to_parks(parks_gdf, cap_joined, config):
     cap_agg = cap_agg.rename(columns={"EstInvestment": config.DATASET_INFO["CapitalProjects"]["est_total_field"]})
     parks_gdf = parks_gdf.reset_index().rename(columns={"index": "park_index"})
     merged = parks_gdf.merge(cap_agg, left_on="park_index", right_on="index_right", how="left")
+    
+    # Replace NaN values in EstInvTotal with 0
+    est_total_field = config.DATASET_INFO["CapitalProjects"]["est_total_field"]
+    merged[est_total_field] = merged[est_total_field].fillna(0)
+    
     return merged
 
 # ---------------------------
@@ -270,11 +267,13 @@ def process_site_flood(args):
     from shapely.geometry import box
     geom = site.geometry
     if geom is None or geom.is_empty:
-        return idx, {col: 0.0 for col in [
-            'Cst_500_in','Cst_500_nr','Cst_100_in','Cst_100_nr',
-            'StrmShl_in','StrmShl_nr','StrmDp_in','StrmDp_nr','StrmTid_in','StrmTid_nr'
-        ]}
+        # Only provide nr fields now
+        return idx, {
+            'Cst_500_nr': 0.0, 'Cst_100_nr': 0.0,
+            'StrmShl_nr': 0.0, 'StrmDp_nr': 0.0, 'StrmTid_nr': 0.0
+        }
     centroid = geom.centroid
+    # Use the buffer from config (buffer_dist)
     circle_geom = centroid.buffer(buffer_dist)
     minx, miny, maxx, maxy = circle_geom.bounds
     bbox = (minx, miny, maxx, maxy)
@@ -282,37 +281,29 @@ def process_site_flood(args):
         fema_arr, fema_transform = read_raster_window(fema_path, bbox, target_crs)
         storm_arr, _ = read_raster_window(storm_path, bbox, target_crs)
     except Exception as e:
-        return idx, {col: 0.0 for col in [
-            'Cst_500_in','Cst_500_nr','Cst_100_in','Cst_100_nr',
-            'StrmShl_in','StrmShl_nr','StrmDp_in','StrmDp_nr','StrmTid_in','StrmTid_nr'
-        ]}
+        return idx, {
+            'Cst_500_nr': 0.0, 'Cst_100_nr': 0.0,
+            'StrmShl_nr': 0.0, 'StrmDp_nr': 0.0, 'StrmTid_nr': 0.0
+        }
     min_height = min(fema_arr.shape[0], storm_arr.shape[0])
     min_width = min(fema_arr.shape[1], storm_arr.shape[1])
     fema_arr = fema_arr[:min_height, :min_width]
     storm_arr = storm_arr[:min_height, :min_width]
-    width, height = fema_arr.shape[1], fema_arr.shape[0]
+    height, width = fema_arr.shape
     from rasterio import features
+    # “site_mask” uses the park polygon (for “inside” but now we won’t use these values)
     site_rast = features.rasterize([(geom, 1)], out_shape=(height, width),
                                     transform=fema_transform, fill=0, dtype=np.uint8)
     circle_rast = features.rasterize([(circle_geom, 1)], out_shape=(height, width),
                                       transform=fema_transform, fill=0, dtype=np.uint8)
-    site_mask = (site_rast == 1)
     circle_mask = (circle_rast == 1)
-    inside_count = site_mask.sum()
-    circle_count = circle_mask.sum()
     results = {}
-    # Process FEMA coastal values
-    for cval, ctag in COAST_VALUES.items():
-        inside_match = ((site_mask) & (fema_arr == cval)).sum() if inside_count > 0 else 0
-        results[f"Cst_{ctag}_in"] = inside_match / inside_count if inside_count else 0.0
-        nr_match = ((circle_mask) & (fema_arr == cval)).sum() if circle_count > 0 else 0
-        results[f"Cst_{ctag}_nr"] = nr_match / circle_count if circle_count else 0.0
-    # Process storm values
-    for sval, stag in STORM_VALUES.items():
-        inside_match = ((site_mask) & (storm_arr == sval)).sum() if inside_count > 0 else 0
-        results[f"Strm{stag}_in"] = inside_match / inside_count if inside_count else 0.0
-        nr_match = ((circle_mask) & (storm_arr == sval)).sum() if circle_count > 0 else 0
-        results[f"Strm{stag}_nr"] = nr_match / circle_count if circle_count else 0.0
+    for cval, ctag in {1: '500', 2: '100'}.items():
+        nr_match = ((circle_mask) & (fema_arr == cval)).sum() if circle_mask.sum() > 0 else 0
+        results[f"Cst_{ctag}_nr"] = nr_match / circle_mask.sum() if circle_mask.sum() else 0.0
+    for sval, stag in {1: 'Shl', 2: 'Dp', 3: 'Tid'}.items():
+        nr_match = ((circle_mask) & (storm_arr == sval)).sum() if circle_mask.sum() > 0 else 0
+        results[f"Strm{stag}_nr"] = nr_match / circle_mask.sum() if circle_mask.sum() else 0.0
     return idx, results
 
 def compute_raw_flood(gdf, config):
@@ -330,25 +321,15 @@ def compute_raw_flood(gdf, config):
         results = list(executor.map(process_site_flood, args_list))
     results_dict = {idx: res for idx, res in results}
     results_df = pd.DataFrame.from_dict(results_dict, orient='index')
-    flood_components = [
-        'Cst_500_in', 'Cst_500_nr', 'Cst_100_in', 'Cst_100_nr',
-        'StrmShl_in', 'StrmShl_nr', 'StrmDp_in', 'StrmDp_nr', 'StrmTid_in', 'StrmTid_nr'
-    ]
+    flood_components = ['Cst_500_nr', 'Cst_100_nr', 'StrmShl_nr', 'StrmDp_nr', 'StrmTid_nr']
     gdf = gdf.drop(columns=flood_components, errors='ignore')
     gdf = gdf.join(results_df[flood_components])
     return gdf
 
 def compute_flood_hazard_indices(gdf, config, coastal_weights=None, stormwater_weights=None):
-    flood_components = [
-        'Cst_500_in', 'Cst_500_nr', 'Cst_100_in', 'Cst_100_nr',
-        'StrmShl_in', 'StrmShl_nr', 'StrmDp_in', 'StrmDp_nr', 'StrmTid_in', 'StrmTid_nr'
-    ]
+    flood_components = ['Cst_500_nr', 'Cst_100_nr', 'StrmShl_nr', 'StrmDp_nr', 'StrmTid_nr']
     if not all(comp in gdf.columns for comp in flood_components):
         gdf = compute_raw_flood(gdf, config)
-    # Exclude sites with any coastal flooding “inside”
-    exclude = (gdf['Cst_500_in'] > 0) | (gdf['Cst_100_in'] > 0) | (gdf['StrmTid_in'] > 0)
-    if exclude.any():
-        gdf = gdf[~exclude].copy()
     if coastal_weights is None:
         coastal_weights = {'Cst_500_nr': 0.15, 'Cst_100_nr': 0.35, 'StrmTid_nr': 0.5}
     coastal_raw = (coastal_weights['Cst_500_nr'] * gdf['Cst_500_nr'] +
@@ -460,20 +441,19 @@ def run_analysis():
     cap_projects = gpd.read_file(CAPITAL_PROJECTS_FILE)
     cap_projects = ensure_crs_vector(cap_projects, CRS)
     
-    # Process CapitalProjects: filter by completion date and reformat funding values
+    # Process CapitalProjects: filter and reformat funding values
     import config  # import config to pass as module
     cap_projects = process_capital_projects(cap_projects, config)
     
     # Allocate multi-site project funding using park acres
     cap_projects_alloc = allocate_investment_by_tracker(cap_projects, parks)
     
-    # Spatially join capital projects to parks (using intersection)
+    # Spatial join (intersection)
     if "index_right" in cap_projects_alloc.columns:
         cap_projects_alloc = cap_projects_alloc.drop(columns=["index_right"])
-        
     cap_joined = gpd.sjoin(cap_projects_alloc, parks[['acres', 'globalid', 'geometry']], how="left", predicate="intersects")
     
-    # Aggregate the joined capital project fields to each park:
+    # Aggregate capital project fields to each park
     parks_agg = aggregate_cap_proj_to_parks(parks, cap_joined, config)
     
     # Compute raster‐based indices on parks_agg
@@ -482,6 +462,33 @@ def run_analysis():
     parks_agg = compute_heat_vulnerability_index(parks_agg, config)
     parks_agg = compute_flood_vulnerability_index(parks_agg, config)
     
-    # Write the final NYC_Parks_Census geojson to output
+    # --- NEW INDEX CALCULATIONS ---
+    # Normalize total investment
+    parks_agg["Inv_Norm"] = min_max_normalize(parks_agg["EstInvTotal"])
+    
+    # Compute hazard_factor (weighted: 25% Coastal, 50% Stormwater, 25% Heat)
+    hf_w = config.HAZARD_FACTOR_WEIGHTS
+    parks_agg["hazard_factor"] = (
+         hf_w["CoastalFloodHaz"] * parks_agg[config.DATASET_INFO["Coastal_Flood_Hazard_Index"]["alias"]] +
+         hf_w["StormFloodHaz"] * parks_agg[config.DATASET_INFO["Stormwater_Flood_Hazard_Index"]["alias"]] +
+         hf_w["HeatHaz"] * parks_agg[config.DATASET_INFO["Heat_Hazard_Index"]["alias"]]
+    )
+    
+    # Compute vul_factor (weighted: 50% Heat Vulnerability, 50% Flood Vulnerability)
+    vf_w = config.VULNERABILITY_FACTOR_WEIGHTS
+    parks_agg["vul_factor"] = (
+         vf_w["HeatVuln"] * parks_agg[config.DATASET_INFO["Heat_Vulnerability_Index"]["alias"]] +
+         vf_w["FloodVuln"] * parks_agg[config.DATASET_INFO["Flood_Vulnerability_Index"]["alias"]]
+    )
+    
+    # Compute suitability (weighted: 25% hazard, 25% vulnerability, 50% investment inverted)
+    su_w = config.SUITABILITY_WEIGHTS
+    parks_agg["suitability"] = (
+         su_w["hazard_factor"] * parks_agg["hazard_factor"] +
+         su_w["vul_factor"] * parks_agg["vul_factor"] +
+         su_w["Inv_Norm"] * (1 - parks_agg["Inv_Norm"])
+    )
+    
+    # Write the final geojson to output
     parks_agg.to_file(OUTPUT_GEOJSON, driver="GeoJSON")
     print("Analysis complete. Output saved to:", OUTPUT_GEOJSON)

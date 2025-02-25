@@ -13,430 +13,186 @@ from config import (
     DATASET_INFO,
     ICONS_DIR,
     INDEX_ICONS,
-    HAZARD_FACTORS,
-    VULNERABILITY_FACTORS,
-    HAZARD_SUBINDICES,
+    OUTLINE_SVG,
     OUTPUT_DIR,
     OUTPUT_GEOJSON,
-    OUTPUT_WEBMAP
+    OUTPUT_WEBMAP,
+    HEAT_FILE,
+    FEMA_RASTER,
+    STORM_RASTER
 )
 
-# Column -> Alias mapping for the Capital Projects table:
-FIELD_ALIASES = {
-    "Title": "Project",
-    "CurrentPha": "Phase",
-    "Construc_4": "Completion",
-    "ProjectLia": "Liason"
-}
+###############################################################################
+# 1. CSS STYLE BLOCK
+###############################################################################
+STYLE_BLOCK = """
+<style>
+  /* Overall popup styling */
+  .popup-content {
+    font-family: sans-serif;
+    line-height: 1.4em;
+    color: #333;
+  }
+  
+  .popup-header {
+    font-size: 20px;
+    font-weight: bold;
+    margin-bottom: 0.4em;
+  }
+  
+  /* Bubbles (cards) */
+  .info-bubble {
+    background: #f9f9f9;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  }
+  .info-bubble h4 {
+    margin-top: 0;
+    margin-bottom: 0.6em;
+    font-size: 16px;
+    font-weight: bold;
+  }
+  
+  /* Collapsible capital projects link */
+  .collapsible {
+    margin-top: 10px;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    background-color: #eaeaea;
+    overflow: hidden;
+  }
+  .collapsible summary {
+    padding: 8px;
+    margin: 0;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  
+  /* Collapsible table styling */
+  .popup-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .popup-table th, .popup-table td {
+    border: 1px solid #ddd;
+    padding: 4px;
+    text-align: center;
+  }
+  .scrollable-table {
+    max-height: 150px;
+    overflow-y: auto;
+  }
+  
+  /* Icon rows & columns */
+  .icon-row {
+    display: flex;
+    /* Space the columns evenly across the row */
+    justify-content: space-evenly; 
+    align-items: center; 
+    gap: 10px;
+  }
+  .icon-col {
+    /* Each column will stack icon + label vertically, centered */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
 
-# List of Capital Project fields to display in columns (in the order you prefer):
-PROJECT_FIELDS = [
-    "Title",
-    "CurrentPha",
-    "Construc_4",
-    "ProjectLia",
-]
+  /* Container for the icon and outline, both 60x60 */
+  .circle-bg {
+    position: relative;
+    width: 60px;
+    height: 60px;
+    background: none;
+  }
+  .circle-icon {
+    width: 60px;
+    height: 60px;
+    /* We'll set opacity inline for each icon */
+  }
+  .icon-outline {
+    width: 60px;
+    height: 60px;
+    position: absolute;
+    top: 0;
+    left: 0;
+    opacity: 1; /* always full opacity */
+  }
 
-# List of hazard/vulnerability fields to display (row by row):
-HAZARD_FIELDS = ["HeatHaz", "CoastalFloodHaz", "StormFloodHaz", "HeatVuln", "FloodVuln"]
+  .icon-label {
+    font-size: 12px;
+    margin-top: 4px;
+    color: #333;
+  }
+</style>
+"""
 
-def parse_construc_4(dt_string):
-    """
-    Parses a datetime string like '11/01/2023 12:00:00 AM' and returns '11/01/2023'.
-    If parsing fails, returns the original string.
-    """
-    dt_string = dt_string.strip()
-    if not dt_string:
-        return dt_string
+###############################################################################
+# 2. HELPER FUNCTIONS
+###############################################################################
+def hex_to_rgb(hex_color):
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+def rgb_to_hex(rgb):
+    return '#{:02x}{:02x}{:02x}'.format(*rgb)
+
+def interpolate_color(val, start_hex, end_hex):
+    """Interpolate between start_hex and end_hex based on val in [0..1]."""
+    start_rgb = hex_to_rgb(start_hex)
+    end_rgb = hex_to_rgb(end_hex)
+    interp = tuple(int(s + (e - s) * val) for s, e in zip(start_rgb, end_rgb))
+    return rgb_to_hex(interp)
+
+def format_value(val):
+    """Round numeric to two decimals if possible, else return original."""
     try:
-        dt = datetime.strptime(dt_string, "%m/%d/%Y %I:%M:%S %p")
-        return dt.strftime("%m/%d/%Y")
-    except:
-        return dt_string
-
-def parse_splitted(properties, field_name):
-    """
-    Safely split the comma-separated string from 'properties[field_name]'.
-    Returns a list. If the field doesn't exist or is empty, returns an empty list.
-    
-    Special handling for 'Construc_4': we parse the date string and remove the time portion.
-    """
-    if field_name in properties and properties[field_name]:
-        splitted = properties[field_name].split(", ")
-        # If this is Construc_4, convert each item to a simple date string
-        if field_name == "Construc_4":
-            splitted = [parse_construc_4(x) for x in splitted]
-        return splitted
-    return []
-
-def remove_signname_from_title(title, signname):
-    """
-    Removes the park name (signname) from the start of the Title (including any leading spaces).
-    Example: if signname == "Madison Square Park", and Title == "Madison Square Park Title for Project",
-    this function will remove 'Madison Square Park ' from the start.
-    """
-    if not title or not signname:
-        return title
-    # Build a regex pattern that matches signname + optional spaces at the start
-    pattern = r"^" + re.escape(signname) + r"\s*"
-    return re.sub(pattern, "", title)
-
-def format_est_inv_total(value):
-    """
-    Tries to parse the value as float and format with commas (rounded to nearest dollar).
-    If parsing fails, returns the original value as-is.
-    """
-    try:
-        val_float = float(value)
-        # Format with commas, no decimal
-        return f"{val_float:,.0f}"
-    except:
-        return value
+        num = float(val)
+        return f"{num:.2f}"
+    except (ValueError, TypeError):
+        return val
 
 def create_downsampled_raster(input_raster, output_raster, scale_factor=0.1):
-    """
-    Create a smaller, downsampled version of a raster using rasterio
-    """
     import rasterio
     from rasterio.enums import Resampling
-    
     with rasterio.open(input_raster) as src:
-        # Calculate new dimensions
         width = int(src.width * scale_factor)
         height = int(src.height * scale_factor)
-        
-        # Define output profile
         kwargs = src.profile.copy()
-        kwargs.update({
-            'width': width,
-            'height': height
-        })
-        
-        # Read and resample data
+        kwargs.update({'width': width, 'height': height})
         data = src.read(
             out_shape=(src.count, height, width),
             resampling=Resampling.average
         )
-        
-        # Write resampled data
         with rasterio.open(output_raster, 'w', **kwargs) as dst:
             dst.write(data)
-            
     return output_raster
 
-def generate_feature_html(properties):
-    """
-    Popup layout:
-      1) Park name at top
-      2) 'Estimated Recent Investments' bubble
-         - inside it, a hover-to-open dropdown for 'Recent Capital Projects'
-      3) 'Climate Risk Factor' bubble
-         - inside it, a single hover-to-open dropdown for 'Hazard'
-           (Vulnerability is omitted, since it has no sub-indices and we don't want it in the popup)
-         - plus the 5 icons (3 hazards + 2 vulnerabilities) in two rows below the main statistic
-    """
-
-    # --- Inline CSS/JS for hover-based <details> toggling and arrow rotation ---
-    style_and_script = """
-    <style>
-    .hover-details summary::-webkit-details-marker {
-      display: none; /* Hide the default triangle marker in Chrome/Safari */
-    }
-    .hover-details .dropdown-icon {
-      transition: transform 0.3s;
-    }
-    .hover-details[open] .dropdown-icon {
-      transform: rotate(180deg);
-    }
-    </style>
-    <script>
-    document.addEventListener('DOMContentLoaded', function() {
-      // Convert <details.hover-details> to hover-based open/close
-      document.querySelectorAll('.hover-details').forEach(function(el) {
-        let summary = el.querySelector('summary');
-        // Prevent default click toggle
-        if (summary) {
-          summary.addEventListener('click', function(e) {
-            e.preventDefault();
-          });
-        }
-        el.addEventListener('mouseenter', function() {
-          el.setAttribute('open', '');
-        });
-        el.addEventListener('mouseleave', function() {
-          el.removeAttribute('open');
-        });
-      });
-    });
-    </script>
-    """
-
-    # --- Park name ---
-    park_name = properties.get("signname", "Unknown Park")
-
-    # --- Estimated Investments ---
-    raw_total = properties.get("EstInvTotal", "0")
-    formatted_total = format_est_inv_total(raw_total)
-
-    # --- Prepare Capital Projects (for the nested hover dropdown) ---
-    project_columns = {}
-    for f in PROJECT_FIELDS:
-        project_columns[f] = parse_splitted(properties, f)
-    num_projects = max(len(lst) for lst in project_columns.values()) if project_columns else 0
-
-    # Clean up Titles by removing park name
-    if "Title" in project_columns:
-        project_columns["Title"] = [
-            remove_signname_from_title(t, park_name) for t in project_columns["Title"]
-        ]
-
-    if num_projects > 0:
-        # Build a small table for projects
-        table_html = []
-        table_html.append("<table style='width:100%; border-collapse:collapse; font-size:12px;'>")
-        table_html.append("<thead><tr>")
-        for col_name in PROJECT_FIELDS:
-            alias = FIELD_ALIASES.get(col_name, col_name)
-            table_html.append(f"<th style='background:#eee; padding:4px; font-weight:bold;'>{alias}</th>")
-        table_html.append("</tr></thead><tbody>")
-        for i in range(num_projects):
-            table_html.append("<tr>")
-            for col_name in PROJECT_FIELDS:
-                val = project_columns[col_name][i] if i < len(project_columns[col_name]) else ""
-                table_html.append(f"<td style='padding:4px;'>{val}</td>")
-            table_html.append("</tr>")
-        table_html.append("</tbody></table>")
-        projects_content = "".join(table_html)
-    else:
-        projects_content = "<p style='margin:0;'>No recent capital projects.</p>"
-
-    # --- "Estimated Investments" bubble, with nested hover-details for Projects ---
-    investments_bubble = f"""
-    <div style="
-        border:1px solid #ddd; 
-        background-color:#f0f0f0; 
-        border-radius:12px; 
-        margin-bottom:10px; 
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
-        padding:10px;">
-      <p style="margin:0; font-size:16px;">
-        <span style="font-weight:normal;">Estimated Recent Investments:</span><br>
-        <span style="font-weight:bold;">${formatted_total}</span> (since {cutoff_date_simple})
-      </p>
-
-      <!-- Nested hover-to-open dropdown for Recent Capital Projects -->
-      <details class="hover-details" style="
-          border:1px solid #ccc;
-          border-radius:8px;
-          margin-top:10px;
-          background-color:#eaeaea;
-          overflow:hidden;">
-        <summary style="
-            font-size:14px; 
-            cursor:pointer; 
-            padding:8px; 
-            margin:0; 
-            display:flex; 
-            justify-content:space-between; 
-            align-items:center;">
-          <span>Recent Capital Projects</span>
-          <span class="dropdown-icon" style="font-weight:bold;">▼</span>
-        </summary>
-        <div style="padding:8px;">
-          {projects_content}
-        </div>
-      </details>
-    </div>
-    """
-
-    # --- Climate Risk Factor (non-collapsible bubble) ---
-    climate_risk = properties.get("ClimateRiskFactor", "N/A")
-
-    # Helper to build a table for hazard factors only
-    def build_hazard_table(properties):
-        rows = []
-        for fk in HAZARD_FACTORS:
-            info = DATASET_INFO.get(fk, {})
-            alias = info.get("alias", "N/A")
-            raw_field = info.get("raw", "")
-            name = info.get("name", fk)
-            suffix = info.get("suffix", "")
-
-            raw_val = properties.get(raw_field, "N/A")
-            idx_val = properties.get(alias, "N/A")
-
-            # Format numeric
-            if isinstance(raw_val, (int, float)):
-                raw_val = f"{raw_val:.2f}{suffix}"
-            if isinstance(idx_val, (int, float)):
-                idx_val = f"{idx_val:.2f}"
-
-            # Main row
-            rows.append(f"""
-            <tr>
-              <td style="padding:4px; font-weight:bold;">{name}</td>
-              <td style="padding:4px;">{raw_val}</td>
-              <td style="padding:4px;">{idx_val}</td>
-            </tr>
-            """)
-
-            # Sub‐indices for each hazard factor
-            sublist = HAZARD_SUBINDICES.get(fk, [])
-            for (sub_label, sub_key) in sublist:
-                val = properties.get(sub_key, "N/A")
-                if isinstance(val, (int, float)):
-                    val = f"{val:.2f}"
-                rows.append(f"""
-                <tr>
-                  <td style="padding:4px; padding-left:20px;">{sub_label}</td>
-                  <td style="padding:4px;">{val}</td>
-                  <td style="padding:4px;">N/A</td>
-                </tr>
-                """)
-
-        return f"""
-        <table style="width:100%; border-collapse:collapse; font-size:12px;">
-          <thead>
-            <tr>
-              <th style="background:#eee; padding:4px;">Hazard Factor</th>
-              <th style="background:#eee; padding:4px;">Raw Value</th>
-              <th style="background:#eee; padding:4px;">Index Value</th>
-            </tr>
-          </thead>
-          <tbody>
-            {''.join(rows)}
-          </tbody>
-        </table>
-        """
-
-    hazard_table_html = build_hazard_table(properties)
-
-    hazard_dropdown = f"""
-    <details class="hover-details" style="
-        border:1px solid #ccc;
-        border-radius:8px;
-        margin-top:10px;
-        background-color:#eaeaea;
-        overflow:hidden;">
-      <summary style="
-          font-size:14px; 
-          cursor:pointer; 
-          padding:8px; 
-          margin:0; 
-          display:flex; 
-          justify-content:space-between; 
-          align-items:center;">
-        <span>Hazard</span>
-        <span class="dropdown-icon" style="font-weight:bold;">▼</span>
-      </summary>
-      <div style="padding:8px;">
-        {hazard_table_html}
-      </div>
-    </details>
-    """
-
-    # The five icons below the main Climate Risk Factor statistic, 3 on top row, 2 on bottom row
-    icons_html = f"""
-    <div style="margin-top:10px;">
-      <!-- Top row: Heat Hazard, Coastal Flood Hazard, Stormwater Flood Hazard -->
-      <div style="display: flex; justify-content: center; gap: 20px; margin-bottom: 10px;">
-        <div style="text-align:center;">
-          <img src="{ICONS_DIR}/{INDEX_ICONS['Heat Hazard']}" style="width:50px; height:auto;" />
-          <div style="font-size:12px; margin-top:4px;">Heat Hazard</div>
-        </div>
-        <div style="text-align:center;">
-          <img src="{ICONS_DIR}/{INDEX_ICONS['Coastal Flood Hazard']}" style="width:50px; height:auto;" />
-          <div style="font-size:12px; margin-top:4px;">Coastal Flood Hazard</div>
-        </div>
-        <div style="text-align:center;">
-          <img src="{ICONS_DIR}/{INDEX_ICONS['Stormwater Flood Hazard']}" style="width:50px; height:auto;" />
-          <div style="font-size:12px; margin-top:4px;">Stormwater Flood Hazard</div>
-        </div>
-      </div>
-      <!-- Bottom row: Heat Vulnerability, Flood Vulnerability -->
-      <div style="display: flex; justify-content: center; gap: 20px;">
-        <div style="text-align:center;">
-          <img src="{ICONS_DIR}/{INDEX_ICONS['Heat Vulnerability']}" style="width:50px; height:auto;" />
-          <div style="font-size:12px; margin-top:4px;">Heat Vulnerability</div>
-        </div>
-        <div style="text-align:center;">
-          <img src="{ICONS_DIR}/{INDEX_ICONS['Flood Vulnerability']}" style="width:50px; height:auto;" />
-          <div style="font-size:12px; margin-top:4px;">Flood Vulnerability</div>
-        </div>
-      </div>
-    </div>
-    """
-
-    climate_bubble = f"""
-    <div style="
-        border:1px solid #ddd; 
-        background-color:#f0f0f0; 
-        border-radius:12px; 
-        margin-bottom:10px; 
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
-        padding:10px;">
-      <p style="margin:0; font-size:16px;">
-        <span style="font-weight:normal;">Climate Risk Factor:</span><br>
-        <span style="font-weight:bold;">{climate_risk}</span>
-      </p>
-      <!-- Only Hazard dropdown is shown; no Vulnerability dropdown -->
-      {hazard_dropdown}
-      {icons_html}
-    </div>
-    """
-
-    # --- Combine everything ---
-    html = []
-    html.append(style_and_script)  # Inline <style> + <script> for hover-based details
-    html.append(f'<h3 style="margin-bottom:0.2em; font-size:22px; font-weight:bold;">{park_name}</h3>')
-    html.append(investments_bubble)
-    html.append(climate_bubble)
-
-    return "".join(html)
-
-def style_function(feature):
-    return {
-        "fillColor": DATASET_INFO["Webmap"]["NYC_Parks"]["hex"],
-        "color": DATASET_INFO["Webmap"]["NYC_Parks"]["hex"],
-        "weight": 2,
-        "fillOpacity": 0.6,
-    }
-
-def hex_to_rgba(hex_color, alpha=255):
-    hex_color = hex_color.lstrip('#')
-    if len(hex_color) == 6:
-        r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-    elif len(hex_color) == 3:
-        r, g, b = tuple(int(hex_color[i]*2, 16) for i in range(3))
-    else:
-        r, g, b = (0, 0, 0)
-    return (r, g, b, alpha)
-
 def raster_to_png(input_raster, output_png, colormap=None, raster_type=None):
+    """Downsampled raster to a PNG overlay with optional colormap."""
     import numpy as np
     from PIL import Image
     import rasterio
-    from config import DATASET_INFO
-
+    
     with rasterio.open(input_raster) as src:
         data = src.read(1)
         nodata = src.nodata
-    if nodata is not None:
-        mask = (data != nodata)
-    else:
-        mask = (data != 0)
+    mask = (data != nodata) if nodata is not None else (data != 0)
     height, width = data.shape
     rgba = np.zeros((height, width, 4), dtype=np.uint8)
     
+    def hex_to_rgba(hex_color, alpha=200):
+        rgb = hex_to_rgb(hex_color)
+        return (rgb[0], rgb[1], rgb[2], alpha)
+
     if colormap == "heat":
         if data[mask].size > 0:
-            if data.max() > 200:  # likely in Kelvin
-                data_f = (data - 273.15) * 9/5 + 32
-            else:
-                data_f = data
-            min_temp = np.percentile(data_f[mask], 1)
-            max_temp = np.percentile(data_f[mask], 99)
-            norm = np.clip((data_f - min_temp) / (max_temp - min_temp), 0, 1)
+            min_temp = np.percentile(data[mask], 1)
+            max_temp = np.percentile(data[mask], 99)
+            norm = np.clip((data - min_temp) / (max_temp - min_temp), 0, 1)
             for i in range(height):
                 for j in range(width):
                     if mask[i, j]:
@@ -449,22 +205,22 @@ def raster_to_png(input_raster, output_png, colormap=None, raster_type=None):
                             rgba[i, j, :] = [255, int(255 * (1 - (t - 0.66) * 3)), 0, 200]
     elif colormap == "flood":
         if raster_type == "FEMA":
-            color_1pct = hex_to_rgba(DATASET_INFO["Webmap"]["FEMA_FloodHaz"]["hex_1pct"], alpha=200)
-            color_0_2pct = hex_to_rgba(DATASET_INFO["Webmap"]["FEMA_FloodHaz"]["hex_0_2pct"], alpha=200)
+            col1 = hex_to_rgba(DATASET_INFO["Webmap"]["FEMA_FloodHaz"]["hex_1pct"])
+            col2 = hex_to_rgba(DATASET_INFO["Webmap"]["FEMA_FloodHaz"]["hex_0_2pct"])
             for i in range(height):
                 for j in range(width):
                     if mask[i, j]:
                         val = data[i, j]
                         if val == 1:
-                            rgba[i, j, :] = color_1pct
+                            rgba[i, j, :] = col1
                         elif val == 2:
-                            rgba[i, j, :] = color_0_2pct
+                            rgba[i, j, :] = col2
                         else:
                             rgba[i, j, 3] = 0
         elif raster_type == "Stormwater":
             storm_hex = DATASET_INFO["Webmap"]["2080_Stormwater"]["hex"]
             shallow_alpha = DATASET_INFO["Webmap"]["2080_Stormwater"].get("shallow_alpha", 0.5)
-            base_color = hex_to_rgba(storm_hex, alpha=255)
+            base_color = hex_to_rgb(storm_hex)
             for i in range(height):
                 for j in range(width):
                     if mask[i, j]:
@@ -480,88 +236,273 @@ def raster_to_png(input_raster, output_png, colormap=None, raster_type=None):
                         rgba[i, j, :] = [base_color[0], base_color[1], base_color[2], alpha]
         else:
             if data[mask].size > 0:
-                if data[mask].max() > data[mask].min():
-                    norm = np.clip((data - data[mask].min()) / (data[mask].max() - data[mask].min()), 0, 1)
-                else:
-                    norm = np.zeros_like(data)
+                norm = np.clip((data - data[mask].min()) / (data[mask].max() - data[mask].min()), 0, 1)
                 for i in range(height):
                     for j in range(width):
-                        if mask[i, j] and norm[i, j] > 0:
-                            rgba[i, j, 0] = 0
-                            rgba[i, j, 1] = int(100 + 155 * norm[i, j])
-                            rgba[i, j, 2] = int(255 - 100 * norm[i, j])
-                            rgba[i, j, 3] = int(100 + 155 * norm[i, j])
+                        if mask[i, j]:
+                            val = int(255 * norm[i, j])
+                            rgba[i, j, :] = [val, val, val, 255]
     else:
+        # Default grayscale
         for i in range(height):
             for j in range(width):
                 if mask[i, j]:
                     val = int(255 * (data[i, j] / data.max()))
                     rgba[i, j, :] = [val, val, val, 255]
-    
+                    
     img = Image.fromarray(rgba)
     img.save(output_png)
     return output_png
 
+###############################################################################
+# 3. CAPITAL PROJECTS TABLE
+###############################################################################
+def generate_capital_projects_table(properties):
+    """Parses comma-separated fields for capital projects into a scrollable table."""
+    PROJECT_FIELDS = ["Title", "CurrentPha", "Construc_4", "ProjectLia"]
+    FIELD_ALIASES = {
+        "Title": "Project",
+        "CurrentPha": "Phase",
+        "Construc_4": "Completion",
+        "ProjectLia": "Liason"
+    }
+    data = {}
+    for field in PROJECT_FIELDS:
+        raw_val = properties.get(field, "")
+        if isinstance(raw_val, str):
+            data[field] = [v.strip() for v in raw_val.split(",") if v.strip()]
+        else:
+            data[field] = []
+    n = max((len(lst) for lst in data.values()), default=0)
+    if n == 0:
+        return "<p>No recent capital projects.</p>"
+    
+    # Build the table
+    header = "<tr>" + "".join(f"<th>{FIELD_ALIASES.get(f, f)}</th>" for f in PROJECT_FIELDS) + "</tr>"
+    rows = [header]
+    for i in range(n):
+        row = "<tr>"
+        for f in PROJECT_FIELDS:
+            val = data[f][i] if i < len(data[f]) else ""
+            row += f"<td>{val}</td>"
+        row += "</tr>"
+        rows.append(row)
+    return f"<table class='popup-table'>{''.join(rows)}</table>"
+
+###############################################################################
+# 4. POPUP HTML: MIMICS YOUR MOCKUP
+###############################################################################
+def generate_feature_html(properties):
+    """Builds the popup HTML with:
+       - a title (park name)
+       - Bubble 1: Investments (with Capital icon)
+       - Bubble 2: Hazard rating (3 icons)
+       - Bubble 3: Vulnerability rating (2 icons)
+       Where each icon's opacity is set from an index,
+       but the outline remains fully opaque.
+    """
+    
+    # 1) Title (Park Name)
+    park_name = properties.get("signname", "Unknown Park")
+    title_html = f'<div class="popup-header">{park_name}</div>'
+    
+    # 2) Investments Bubble
+    raw_total = properties.get("EstInvTotal", 0)
+    try:
+        total_investment = f"{float(raw_total):,.0f}"
+    except:
+        total_investment = str(raw_total)
+    
+    # 'Capital' icon opacity from Inv_Norm
+    inv_norm_opacity = properties.get("Inv_Norm", 0)  # 0..1
+    
+    bubble_investments = f"""
+    <div class="info-bubble" style="text-align:center;">
+      <h4>Estimated Recent Investments:<br>${total_investment} (since {cutoff_date_simple})</h4>
+      <div class="icon-row" style="margin-top:10px; justify-content:center;">
+        <div class="icon-col">
+          <div class="circle-bg">
+            <!-- Icon has the alpha -->
+            <img src="{ICONS_DIR}/{INDEX_ICONS['Capital']}" 
+                 class="circle-icon" 
+                 style="opacity:{inv_norm_opacity};" />
+            <!-- Outline is always full opacity -->
+            <img src="{OUTLINE_SVG}" class="icon-outline" style="opacity:1;" />
+          </div>
+          <div class="icon-label">Capital</div>
+        </div>
+      </div>
+      <details class="collapsible" style="margin-top:10px;">
+        <summary style="display:flex; justify-content: space-between; align-items:center; cursor:pointer;">
+          <span>Recent Capital Projects</span>
+          <span style="font-weight:bold;">▼</span>
+        </summary>
+        <div class="scrollable-table" style="padding:8px;">
+          {generate_capital_projects_table(properties)}
+        </div>
+      </details>
+    </div>
+    """
+    
+    # 3) Hazard Bubble
+    hazard_factor = properties.get("hazard_factor", 0)
+    heat_opacity = properties.get("HeatHaz", 0)
+    coastal_opacity = properties.get("CoastalFloodHaz", 0)
+    storm_opacity = properties.get("StormFloodHaz", 0)
+    
+    bubble_hazard = f"""
+    <div class="info-bubble" style="text-align:center;">
+      <h4>Overall Hazard Rating: {hazard_factor:.2f}</h4>
+      <div class="icon-row" style="margin-top:10px; justify-content:center;">
+        <div class="icon-col">
+          <div class="circle-bg">
+            <img src="{ICONS_DIR}/{INDEX_ICONS['Extreme Heat']}" 
+                 class="circle-icon" 
+                 style="opacity:{heat_opacity};" />
+            <img src="{OUTLINE_SVG}" class="icon-outline" style="opacity:1;" />
+          </div>
+          <div class="icon-label">Extreme Heat</div>
+        </div>
+        <div class="icon-col">
+          <div class="circle-bg">
+            <img src="{ICONS_DIR}/{INDEX_ICONS['Coastal Flooding']}" 
+                 class="circle-icon" 
+                 style="opacity:{coastal_opacity};" />
+            <img src="{OUTLINE_SVG}" class="icon-outline" style="opacity:1;" />
+          </div>
+          <div class="icon-label">Coastal Flooding</div>
+        </div>
+        <div class="icon-col">
+          <div class="circle-bg">
+            <img src="{ICONS_DIR}/{INDEX_ICONS['Stormwater Flooding']}" 
+                 class="circle-icon" 
+                 style="opacity:{storm_opacity};" />
+            <img src="{OUTLINE_SVG}" class="icon-outline" style="opacity:1;" />
+          </div>
+          <div class="icon-label">Stormwater Flooding</div>
+        </div>
+      </div>
+    </div>
+    """
+    
+    # 4) Vulnerability Bubble
+    vul_factor = properties.get("vul_factor", 0)
+    hv_opacity = properties.get("HeatVuln", 0)
+    fv_opacity = properties.get("FloodVuln", 0)
+    
+    bubble_vulnerability = f"""
+    <div class="info-bubble" style="text-align:center;">
+      <h4>Overall Vulnerability Rating: {vul_factor:.2f}</h4>
+      <div class="icon-row" style="margin-top:10px; justify-content:center;">
+        <div class="icon-col">
+          <div class="circle-bg">
+            <img src="{ICONS_DIR}/{INDEX_ICONS['Heat Vulnerability']}" 
+                 class="circle-icon" 
+                 style="opacity:{hv_opacity};" />
+            <img src="{OUTLINE_SVG}" class="icon-outline" style="opacity:1;" />
+          </div>
+          <div class="icon-label">Heat Vulnerability</div>
+        </div>
+        <div class="icon-col">
+          <div class="circle-bg">
+            <img src="{ICONS_DIR}/{INDEX_ICONS['Flood Vulnerability']}" 
+                 class="circle-icon" 
+                 style="opacity:{fv_opacity};" />
+            <img src="{OUTLINE_SVG}" class="icon-outline" style="opacity:1;" />
+          </div>
+          <div class="icon-label">Flood Vulnerability</div>
+        </div>
+      </div>
+    </div>
+    """
+    
+    # 5) Combine everything
+    park_title = f'<div class="popup-header">{park_name}</div>'
+    
+    return f"""
+    <div class="popup-content">
+      {park_title}
+      {bubble_investments}
+      {bubble_hazard}
+      {bubble_vulnerability}
+    </div>
+    """
+
+###############################################################################
+# 5. STYLE FUNCTION FOR PARKS (COLOR BY SUITABILITY)
+###############################################################################
 def style_function(feature):
+    # Use the normalized 'suitability' value to interpolate the fill color
+    suitability = feature['properties'].get("suitability", 0)
+    ramp = DATASET_INFO["Webmap"]["Suitability"]["color_ramp"]
+    fill_color = interpolate_color(suitability, ramp["start"], ramp["end"])
     return {
-        "fillColor": DATASET_INFO["Webmap"]["NYC_Parks"]["hex"],
-        "color": DATASET_INFO["Webmap"]["NYC_Parks"]["hex"],
+        "fillColor": fill_color,
+        "color": fill_color,
         "weight": 2,
         "fillOpacity": 0.6,
     }
 
+###############################################################################
+# 6. MAIN WEBMAP GENERATION
+###############################################################################
 def generate_webmap():
-    # Create a folium map with CartoDB Positron basemap
+    # Create Folium map
     m = folium.Map(location=[40.7128, -74.0060], zoom_start=10, tiles='CartoDB Positron')
     
-    # Create web directory for processed rasters
+    # Inject our CSS styles
+    m.get_root().html.add_child(folium.Element(STYLE_BLOCK))
+    
+    # Create directory for downsampled rasters
     web_dir = os.path.join(OUTPUT_DIR, "web_layers")
     os.makedirs(web_dir, exist_ok=True)
     
-    # Create downsampled versions of rasters
-    scale_factor = 0.1  # Using 10% of original size
-    
+    # Downsample & convert the heat raster
     heat_small = os.path.join(web_dir, "heat_small.tif")
     heat_png = os.path.join(web_dir, "heat.png")
     if not os.path.exists(heat_png):
-        create_downsampled_raster(HEAT_FILE, heat_small, scale_factor)
+        create_downsampled_raster(HEAT_FILE, heat_small, 0.1)
         raster_to_png(heat_small, heat_png, colormap="heat")
     
+    # FEMA flood
     fema_small = os.path.join(web_dir, "fema_small.tif")
     fema_png = os.path.join(web_dir, "fema.png")
     if not os.path.exists(fema_png):
-        create_downsampled_raster(FEMA_RASTER, fema_small, scale_factor)
+        create_downsampled_raster(FEMA_RASTER, fema_small, 0.1)
         raster_to_png(fema_small, fema_png, colormap="flood", raster_type="FEMA")
     
+    # Stormwater flood
     storm_small = os.path.join(web_dir, "storm_small.tif")
     storm_png = os.path.join(web_dir, "storm.png")
     if not os.path.exists(storm_png):
-        create_downsampled_raster(STORM_RASTER, storm_small, scale_factor)
+        create_downsampled_raster(STORM_RASTER, storm_small, 0.1)
         raster_to_png(storm_small, storm_png, colormap="flood", raster_type="Stormwater")
     
+    # Load Parks GeoJSON
     gdf = gpd.read_file(OUTPUT_GEOJSON)
     gdf = gdf.to_crs(epsg=4326)
+    # Build popup HTML for each feature
     gdf["popup_html"] = gdf.apply(lambda row: generate_feature_html(row.to_dict()), axis=1)
     
-    minx, miny, maxx, maxy = gdf.total_bounds
-    nyc_bounds = [[miny, minx], [maxy, maxx]]
-    
+    # Add to folium
     geojson_data = gdf.to_json()
-    
     popup = folium.GeoJsonPopup(
         fields=["popup_html"],
-        aliases=[None],
+        aliases=[None],  # or [""]
         labels=False,
-        parse_html=True,
-        localize=True
-    )
-    
+        parse_html=True
+    )    
+
     folium.GeoJson(
         data=geojson_data,
         name="NYC Parks",
         style_function=style_function,
         popup=popup
     ).add_to(m)
+    
+    # Add raster overlays
+    nyc_bounds = [[gdf.total_bounds[1], gdf.total_bounds[0]],
+                  [gdf.total_bounds[3], gdf.total_bounds[2]]]
     
     heat_config = DATASET_INFO["Webmap"]["Summer_Temperature"]
     folium.raster_layers.ImageOverlay(
@@ -592,51 +533,64 @@ def generate_webmap():
     
     folium.LayerControl().add_to(m)
     
+    # Optional: dynamic layer visibility based on zoom
     min_zoom_level = 13
     script = f"""
     <script>
-        var map = document.querySelector('.folium-map').map;
-        var heatLayer = document.querySelector('img[alt="{heat_config["name"]}"]');
-        var femaLayer = document.querySelector('img[alt="{fema_config["name"]}"]');
-        var stormLayer = document.querySelector('img[alt="{storm_config["name"]}"]');
-        
-        function updateVisibility() {{
-            var currentZoom = map.getZoom();
-            var showLayers = currentZoom >= {min_zoom_level};
-            
-            if (heatLayer && map.hasLayer(heatLayer._layer)) {{
-                heatLayer.style.opacity = showLayers ? "0.7" : "0";
-            }}
-            if (femaLayer && map.hasLayer(femaLayer._layer)) {{
-                femaLayer.style.opacity = showLayers ? "0.6" : "0";
-            }}
-            if (stormLayer && map.hasLayer(stormLayer._layer)) {{
-                stormLayer.style.opacity = showLayers ? "0.6" : "0";
-            }}
-        }}
-        
-        map.on('zoomend', updateVisibility);
-        updateVisibility();
+      var map = document.querySelector('.folium-map').map;
+      var heatLayer = document.querySelector('img[alt="{heat_config["name"]}"]');
+      var femaLayer = document.querySelector('img[alt="{fema_config["name"]}"]');
+      var stormLayer = document.querySelector('img[alt="{storm_config["name"]}"]');
+      
+      function updateVisibility() {{
+          var currentZoom = map.getZoom();
+          var showLayers = currentZoom >= {min_zoom_level};
+          
+          if (heatLayer && map.hasLayer(heatLayer._layer)) {{
+              heatLayer.style.opacity = showLayers ? "0.7" : "0";
+          }}
+          if (femaLayer && map.hasLayer(femaLayer._layer)) {{
+              femaLayer.style.opacity = showLayers ? "0.6" : "0";
+          }}
+          if (stormLayer && map.hasLayer(stormLayer._layer)) {{
+              stormLayer.style.opacity = showLayers ? "0.6" : "0";
+          }}
+      }}
+      map.on('zoomend', updateVisibility);
+      updateVisibility();
     </script>
     """
-    
     m.get_root().html.add_child(folium.Element(script))
+
+###############################################################################
+# 7. LEGEND
+###############################################################################
+
+    # Define the HTML for your two legends
     legend_html = """
-    <div id="heat-legend" style="display:none; position: fixed; bottom: 50px; right: 50px; z-index:9999; background: white; padding: 10px; border: 1px solid grey; border-radius: 5px;">
+    <div id="heat-legend" style="display:none; position: fixed; bottom: 50px; right: 50px; z-index:9999; 
+        background: white; padding: 10px; border: 1px solid grey; border-radius: 5px;">
         <h4 style="margin-top:0;">Summer Temperature</h4>
         <div style="display: flex; align-items: center; margin-bottom: 5px;">
-            <div style="width: 200px; height: 20px; background: linear-gradient(to right, #0088ff, #00ffff, #ffff00, #ff0000);"></div>
+            <!-- A gradient bar from cool (blue) to warm (red) -->
+            <div style="width: 200px; height: 20px; 
+                        background: linear-gradient(to right, #0088ff, #00ffff, #ffff00, #ff0000);">
+            </div>
         </div>
         <div style="display: flex; justify-content: space-between; width: 200px;">
             <span>Cooler</span>
             <span>Warmer</span>
         </div>
     </div>
-    
-    <div id="flood-legend" style="display:none; position: fixed; bottom: 50px; right: 50px; z-index:9999; background: white; padding: 10px; border: 1px solid grey; border-radius: 5px;">
+
+    <div id="flood-legend" style="display:none; position: fixed; bottom: 50px; right: 50px; z-index:9999; 
+        background: white; padding: 10px; border: 1px solid grey; border-radius: 5px;">
         <h4 style="margin-top:0;">Flood Hazard</h4>
         <div style="display: flex; align-items: center; margin-bottom: 5px;">
-            <div style="width: 200px; height: 20px; background: linear-gradient(to right, rgba(0,150,255,0.3), rgba(0,150,255,1));"></div>
+            <!-- A gradient bar from low hazard (light blue) to high hazard (dark blue) -->
+            <div style="width: 200px; height: 20px; 
+                        background: linear-gradient(to right, rgba(0,150,255,0.3), rgba(0,150,255,1));">
+            </div>
         </div>
         <div style="display: flex; justify-content: space-between; width: 200px;">
             <span>Low</span>
@@ -644,23 +598,28 @@ def generate_webmap():
         </div>
     </div>
     """
-    
+
+    # Define the JavaScript that shows/hides these legends depending on which overlay is active
     legend_script = """
     <script>
         var map = document.querySelector('.folium-map').map;
+        // Replace these alt text strings with the actual 'name' parameter you gave each layer
         var heatLayer = document.querySelector('img[alt="Summer Temperature"]');
         var femaLayer = document.querySelector('img[alt="FEMA Floodmap"]');
         var stormLayer = document.querySelector('img[alt="2080 Stormwater Flooding"]');
+        
         var heatLegend = document.getElementById('heat-legend');
         var floodLegend = document.getElementById('flood-legend');
         
         function updateLegends() {
+            // If the heat layer is visible, show the heat legend; hide the flood legend
             if (heatLayer && map.hasLayer(heatLayer._layer) && 
                 window.getComputedStyle(heatLayer).opacity > 0 && 
                 window.getComputedStyle(heatLayer).display !== 'none') {
                 heatLegend.style.display = 'block';
                 floodLegend.style.display = 'none';
             }
+            // If the FEMA or stormwater layer is visible, show the flood legend; hide the heat legend
             else if ((femaLayer && map.hasLayer(femaLayer._layer) && 
                       window.getComputedStyle(femaLayer).opacity > 0 && 
                       window.getComputedStyle(femaLayer).display !== 'none') ||
@@ -670,20 +629,27 @@ def generate_webmap():
                 floodLegend.style.display = 'block';
                 heatLegend.style.display = 'none';
             }
+            // Otherwise, hide both
             else {
                 heatLegend.style.display = 'none';
                 floodLegend.style.display = 'none';
             }
         }
         
+        // Update the legend whenever layers are toggled or map zoom changes
         map.on('overlayadd', updateLegends);
         map.on('overlayremove', updateLegends);
         map.on('zoomend', updateLegends);
+        
+        // Initial check (slight delay to ensure layers have rendered)
         setTimeout(updateLegends, 1000);
     </script>
     """
-    
+
+    # Add the legend HTML + script to the map
     m.get_root().html.add_child(folium.Element(legend_html + legend_script))
+    
+    # Save map
     m.save(OUTPUT_WEBMAP)
     print("Webmap generated and saved to:", OUTPUT_WEBMAP)
 

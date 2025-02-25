@@ -27,7 +27,7 @@ ANALYSIS_BUFFER_FT = 2000       # buffer distance (in feet) for raster calculati
 RESOLUTION = 30                 # target raster resolution
 
 # Cutoff date for CapitalProjects (only include projects completed on/after this date)
-cutoff_date_simple = "01/01/2020"
+cutoff_date_simple = "01/01/2018"
 CUTOFF_DATE = datetime.strptime(f"{cutoff_date_simple} 12:00:00 AM", "%m/%d/%Y %I:%M:%S %p")
 
 analysis_buffer_ft = ANALYSIS_BUFFER_FT  # used in text descriptions
@@ -87,8 +87,28 @@ DATASET_INFO = {
         "2080_Stormwater": {"name": "2080 Stormwater Flooding", "hex": "#244489", "shallow_alpha": 0.5},
         "FEMA_FloodHaz": {"name": "FEMA Floodmap", "hex_1pct": "#75E1FF", "hex_0_2pct": "#BEE7FF"},
         "Summer_Temperature": {"name": "Summer Temperature", "color_ramp": {"start": "#C40A0A00", "end": "#C40A0A"}},
-        "NYC_Parks": {"name": "NYC Parks", "hex": "#328232"}
+        "NYC_Parks": {"name": "NYC Parks", "hex": "#328232"},
+        # New suitability ramp: light green to dark green
+        "Suitability": {"name": "Suitability", "color_ramp": {"start": "#90EE90", "end": "#006400"}}
     }
+}
+
+# New weight dictionaries (all weights add to 1 within each index)
+HAZARD_FACTOR_WEIGHTS = {
+    "CoastalFloodHaz": 0.25,
+    "StormFloodHaz": 0.50,
+    "HeatHaz": 0.25
+}
+
+VULNERABILITY_FACTOR_WEIGHTS = {
+    "HeatVuln": 0.50,
+    "FloodVuln": 0.50
+}
+
+SUITABILITY_WEIGHTS = {
+    "hazard_factor": 0.25,
+    "vul_factor": 0.25,
+    "Inv_Norm": 0.50  # note: this will be applied inverted (1 - Inv_Norm)
 }
 
 # Where your SVG icons live
@@ -96,12 +116,16 @@ ICONS_DIR = os.path.join(INPUT_DIR, "icons")
 
 # Mapping from user-friendly name -> SVG filename
 INDEX_ICONS = {
-    "Heat Hazard": "heat_hazard.svg",
-    "Coastal Flood Hazard": "coastal_flood_hazard.svg",
-    "Stormwater Flood Hazard": "stormwater_flood_hazard.svg",
+    "Capital": "capital.svg",
+    "Extreme Heat": "heat_hazard.svg",
+    "Coastal Flooding": "coastal_flood_hazard.svg",
+    "Stormwater Flooding": "stormwater_flood_hazard.svg",
     "Heat Vulnerability": "heat_vulnerability.svg",
     "Flood Vulnerability": "flood_vulnerability.svg"
 }
+
+# New path for the outline overlay svg (to be rendered full‐opacity over hazard icons)
+OUTLINE_SVG = os.path.join(ICONS_DIR, "icon_outline.svg")
 
 # Group the existing hazard/vulnerability indexes
 HAZARD_FACTORS = [
@@ -119,17 +143,12 @@ VULNERABILITY_FACTORS = [
 HAZARD_SUBINDICES = {
     "Heat_Hazard_Index": [],
     "Coastal_Flood_Hazard_Index": [
-        ("500-year Coastal Flood (Inside)", "Cst_500_in"),
         ("500-year Coastal Flood (Nearby)", "Cst_500_nr"),
-        ("100-year Coastal Flood (Inside)", "Cst_100_in"),
         ("100-year Coastal Flood (Nearby)", "Cst_100_nr")
     ],
     "Stormwater_Flood_Hazard_Index": [
-        ("Shallow Stormwater Flood (Inside)", "StrmShl_in"),
         ("Shallow Stormwater Flood (Nearby)", "StrmShl_nr"),
-        ("Deep Stormwater Flood (Inside)", "StrmDp_in"),
         ("Deep Stormwater Flood (Nearby)", "StrmDp_nr"),
-        ("Tidal Stormwater Flood (Inside)", "StrmTid_in"),
         ("Tidal Stormwater Flood (Nearby)", "StrmTid_nr")
     ]
 }
