@@ -88,8 +88,7 @@ DATASET_INFO = {
         "FEMA_FloodHaz": {"name": "FEMA Floodmap", "hex_1pct": "#75E1FF", "hex_0_2pct": "#BEE7FF"},
         "Summer_Temperature": {"name": "Summer Temperature", "color_ramp": {"start": "#C40A0A00", "end": "#C40A0A"}},
         "NYC_Parks": {"name": "NYC Parks", "hex": "#328232"},
-        # New suitability ramp: light green to dark green
-        "Suitability": {"name": "Suitability", "color_ramp": {"start": "#90EE90", "end": "#006400"}}
+        "Suitability": {"name": "Suitability", "color_ramp": {"start": "#efdb8b", "end": "#006400"}}
     }
 }
 

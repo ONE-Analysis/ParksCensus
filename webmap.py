@@ -155,101 +155,133 @@ def format_value(val):
     except (ValueError, TypeError):
         return val
 
-def create_downsampled_raster(input_raster, output_raster, scale_factor=0.1):
+def create_downsampled_raster(input_raster, output_raster, scale_factor=0.1, target_crs="EPSG:4326"):
     import rasterio
-    from rasterio.enums import Resampling
+    from rasterio.warp import calculate_default_transform, reproject, Resampling
+    from affine import Affine
+
+    # First, reproject the input raster to the target CRS
     with rasterio.open(input_raster) as src:
-        width = int(src.width * scale_factor)
-        height = int(src.height * scale_factor)
-        kwargs = src.profile.copy()
-        kwargs.update({'width': width, 'height': height})
-        data = src.read(
-            out_shape=(src.count, height, width),
+        transform, width, height = calculate_default_transform(
+            src.crs, target_crs, src.width, src.height, *src.bounds)
+        kwargs = src.meta.copy()
+        kwargs.update({
+            'crs': target_crs,
+            'transform': transform,
+            'width': width,
+            'height': height
+        })
+        # Save the reprojected raster temporarily
+        reprojected_raster = output_raster.replace(".tif", "_reproj.tif")
+        with rasterio.open(reprojected_raster, 'w', **kwargs) as dst:
+            for i in range(1, src.count + 1):
+                reproject(
+                    source=rasterio.band(src, i),
+                    destination=rasterio.band(dst, i),
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,
+                    dst_crs=target_crs,
+                    resampling=Resampling.bilinear
+                )
+
+    # Now downsample the reprojected raster
+    with rasterio.open(reprojected_raster) as src2:
+        new_width = int(src2.width * scale_factor)
+        new_height = int(src2.height * scale_factor)
+        new_transform = src2.transform * Affine.scale(src2.width / new_width, src2.height / new_height)
+        kwargs2 = src2.meta.copy()
+        kwargs2.update({
+            'width': new_width,
+            'height': new_height,
+            'transform': new_transform
+        })
+        data = src2.read(
+            out_shape=(src2.count, new_height, new_width),
             resampling=Resampling.average
         )
-        with rasterio.open(output_raster, 'w', **kwargs) as dst:
-            dst.write(data)
+        with rasterio.open(output_raster, 'w', **kwargs2) as dst2:
+            dst2.write(data)
     return output_raster
 
 def raster_to_png(input_raster, output_png, colormap=None, raster_type=None):
-    """Downsampled raster to a PNG overlay with optional colormap."""
     import numpy as np
     from PIL import Image
     import rasterio
-    
+
+    # Open the raster and read the first band.
     with rasterio.open(input_raster) as src:
         data = src.read(1)
         nodata = src.nodata
-    mask = (data != nodata) if nodata is not None else (data != 0)
+
+    # Create a mask for valid data.
+    mask = (data != nodata) if nodata is not None else np.ones(data.shape, dtype=bool)
     height, width = data.shape
     rgba = np.zeros((height, width, 4), dtype=np.uint8)
+
+    # Helper functions for color interpolation.
+    def hex_to_rgb(hex_color):
+        hex_color = hex_color.lstrip('#')
+        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
     
-    def hex_to_rgba(hex_color, alpha=200):
-        rgb = hex_to_rgb(hex_color)
-        return (rgb[0], rgb[1], rgb[2], alpha)
+    def rgb_to_hex(rgb):
+        return '#{:02x}{:02x}{:02x}'.format(*rgb)
+    
+    def interpolate_color(val, start_hex, end_hex):
+        start_rgb = hex_to_rgb(start_hex)
+        end_rgb = hex_to_rgb(end_hex)
+        interp_rgb = tuple(int(s + (e - s) * val) for s, e in zip(start_rgb, end_rgb))
+        return rgb_to_hex(interp_rgb)
 
     if colormap == "heat":
-        if data[mask].size > 0:
-            min_temp = np.percentile(data[mask], 1)
-            max_temp = np.percentile(data[mask], 99)
-            norm = np.clip((data - min_temp) / (max_temp - min_temp), 0, 1)
+        # Get the color ramp from your config.
+        ramp = DATASET_INFO["Webmap"]["Summer_Temperature"]["color_ramp"]
+        start_hex = ramp.get("start", "#0000ff")  # Default to blue
+        end_hex = ramp.get("end", "#ff0000")       # Default to red
+        
+        # Trim any extra alpha information.
+        if len(start_hex) > 7:
+            start_hex = start_hex[:7]
+        if len(end_hex) > 7:
+            end_hex = end_hex[:7]
+
+        valid_data = data[mask]
+        if valid_data.size > 0:
+            # Normalize using the 1st and 99th percentiles.
+            min_val = np.percentile(valid_data, 1)
+            max_val = np.percentile(valid_data, 99)
+            # Avoid division by zero.
+            if max_val - min_val == 0:
+                norm = np.zeros_like(data, dtype=float)
+            else:
+                norm = (data - min_val) / (max_val - min_val)
+            norm = np.clip(norm, 0, 1)
+
+            # Apply the color ramp to each valid pixel.
             for i in range(height):
                 for j in range(width):
                     if mask[i, j]:
                         t = norm[i, j]
-                        if t < 0.33:
-                            rgba[i, j, :] = [0, int(255 * t * 3), int(255 * (0.33 + t * 2)), 200]
-                        elif t < 0.66:
-                            rgba[i, j, :] = [int(255 * (t - 0.33) * 3), 255, int(255 * (1 - (t - 0.33) * 3)), 200]
-                        else:
-                            rgba[i, j, :] = [255, int(255 * (1 - (t - 0.66) * 3)), 0, 200]
-    elif colormap == "flood":
-        if raster_type == "FEMA":
-            col1 = hex_to_rgba(DATASET_INFO["Webmap"]["FEMA_FloodHaz"]["hex_1pct"])
-            col2 = hex_to_rgba(DATASET_INFO["Webmap"]["FEMA_FloodHaz"]["hex_0_2pct"])
-            for i in range(height):
-                for j in range(width):
-                    if mask[i, j]:
-                        val = data[i, j]
-                        if val == 1:
-                            rgba[i, j, :] = col1
-                        elif val == 2:
-                            rgba[i, j, :] = col2
-                        else:
-                            rgba[i, j, 3] = 0
-        elif raster_type == "Stormwater":
-            storm_hex = DATASET_INFO["Webmap"]["2080_Stormwater"]["hex"]
-            shallow_alpha = DATASET_INFO["Webmap"]["2080_Stormwater"].get("shallow_alpha", 0.5)
-            base_color = hex_to_rgb(storm_hex)
-            for i in range(height):
-                for j in range(width):
-                    if mask[i, j]:
-                        val = data[i, j]
-                        if val == 1:
-                            alpha = int(shallow_alpha * 255)
-                        elif val == 2:
-                            alpha = int(0.7 * 255)
-                        elif val == 3:
-                            alpha = int(0.9 * 255)
-                        else:
-                            alpha = 0
-                        rgba[i, j, :] = [base_color[0], base_color[1], base_color[2], alpha]
+                        hex_color = interpolate_color(t, start_hex, end_hex)
+                        r, g, b = hex_to_rgb(hex_color)
+                        rgba[i, j] = [r, g, b, 200]  # Semi-transparent
+                    else:
+                        rgba[i, j] = [0, 0, 0, 0]
         else:
-            if data[mask].size > 0:
-                norm = np.clip((data - data[mask].min()) / (data[mask].max() - data[mask].min()), 0, 1)
-                for i in range(height):
-                    for j in range(width):
-                        if mask[i, j]:
-                            val = int(255 * norm[i, j])
-                            rgba[i, j, :] = [val, val, val, 255]
+            rgba[:, :, :] = 0
     else:
-        # Default grayscale
+        # Fallback: render as grayscale.
+        valid_data = data[mask]
+        max_val = np.max(valid_data) if valid_data.size > 0 else 1
         for i in range(height):
             for j in range(width):
                 if mask[i, j]:
-                    val = int(255 * (data[i, j] / data.max()))
-                    rgba[i, j, :] = [val, val, val, 255]
-                    
+                    val = int(255 * (data[i, j] / max_val))
+                    rgba[i, j] = [val, val, val, 255]
+                else:
+                    rgba[i, j] = [0, 0, 0, 0]
+
+    # Save the output PNG.
     img = Image.fromarray(rgba)
     img.save(output_png)
     return output_png
@@ -301,11 +333,23 @@ def generate_feature_html(properties):
        Where each icon's opacity is set from an index,
        but the outline remains fully opaque.
     """
-    
-    # 1) Title (Park Name)
+    # 0) Title (Park Name)
+    # Existing title (park name)
     park_name = properties.get("signname", "Unknown Park")
     title_html = f'<div class="popup-header">{park_name}</div>'
-    
+
+
+    # 1) High-Impact Investment OpportunityBubble
+    suitability = properties.get("suitability", 0)
+    suitability_str = f"{suitability:.2f}"
+    # Compute a red-to-green color (red for low, green for high)
+    high_impact_color = interpolate_color(suitability, "#ff0000", "#00ff00")
+    bubble_high_impact = f"""
+    <div class="info-bubble" style="text-align:center;">
+      <h4>High-Impact Investment Opportunity: <span style="color:{high_impact_color};">{suitability_str}</span></h4>
+    </div>
+    """
+
     # 2) Investments Bubble
     raw_total = properties.get("EstInvTotal", 0)
     try:
@@ -418,10 +462,11 @@ def generate_feature_html(properties):
     
     # 5) Combine everything
     park_title = f'<div class="popup-header">{park_name}</div>'
-    
+
     return f"""
     <div class="popup-content">
-      {park_title}
+      {title_html}
+      {bubble_high_impact}
       {bubble_investments}
       {bubble_hazard}
       {bubble_vulnerability}
@@ -503,34 +548,37 @@ def generate_webmap():
     # Add raster overlays
     nyc_bounds = [[gdf.total_bounds[1], gdf.total_bounds[0]],
                   [gdf.total_bounds[3], gdf.total_bounds[2]]]
-    
+
     heat_config = DATASET_INFO["Webmap"]["Summer_Temperature"]
     folium.raster_layers.ImageOverlay(
         image=heat_png,
         bounds=nyc_bounds,
         name=heat_config["name"],
         opacity=0.7,
-        show=False
+        show=False,
+        alt=heat_config["name"]
     ).add_to(m)
-    
+
     fema_config = DATASET_INFO["Webmap"]["FEMA_FloodHaz"]
     folium.raster_layers.ImageOverlay(
         image=fema_png,
         bounds=nyc_bounds,
         name=fema_config["name"],
         opacity=0.6,
-        show=False
+        show=False,
+        alt=fema_config["name"]
     ).add_to(m)
-    
+
     storm_config = DATASET_INFO["Webmap"]["2080_Stormwater"]
     folium.raster_layers.ImageOverlay(
         image=storm_png,
         bounds=nyc_bounds,
         name=storm_config["name"],
         opacity=0.6,
-        show=False
+        show=False,
+        alt=storm_config["name"]
     ).add_to(m)
-    
+
     folium.LayerControl().add_to(m)
     
     # Optional: dynamic layer visibility based on zoom
@@ -566,40 +614,43 @@ def generate_webmap():
 # 7. LEGEND
 ###############################################################################
 
-    # Define the HTML for your two legends
+    # Define the HTML for your unified legend
     legend_html = """
-    <div id="heat-legend" style="display:none; position: fixed; bottom: 50px; right: 50px; z-index:9999; 
+    <div id="unified-legend" style="position: fixed; bottom: 50px; right: 50px; z-index:9999; 
         background: white; padding: 10px; border: 1px solid grey; border-radius: 5px;">
-        <h4 style="margin-top:0;">Summer Temperature</h4>
-        <div style="display: flex; align-items: center; margin-bottom: 5px;">
-            <!-- A gradient bar from cool (blue) to warm (red) -->
-            <div style="width: 200px; height: 20px; 
-                        background: linear-gradient(to right, #0088ff, #00ffff, #ffff00, #ff0000);">
+        <h4 style="margin-top:0; margin-bottom: 10px;">Map Legend</h4>
+        
+        <!-- Temperature section -->
+        <div id="temp-section" style="display: none;">
+            <h5 style="margin-top:0; margin-bottom: 5px;">Summer Temperature</h5>
+            <div style="display: flex; align-items: center; margin-bottom: 5px;">
+                <div style="width: 200px; height: 20px; 
+                          background: linear-gradient(to right, #0088ff, #00ffff, #ffff00, #ff0000);">
+                </div>
+            </div>
+            <div style="display: flex; justify-content: space-between; width: 200px; margin-bottom: 10px;">
+                <span>Cooler</span>
+                <span>Warmer</span>
             </div>
         </div>
-        <div style="display: flex; justify-content: space-between; width: 200px;">
-            <span>Cooler</span>
-            <span>Warmer</span>
-        </div>
-    </div>
 
-    <div id="flood-legend" style="display:none; position: fixed; bottom: 50px; right: 50px; z-index:9999; 
-        background: white; padding: 10px; border: 1px solid grey; border-radius: 5px;">
-        <h4 style="margin-top:0;">Flood Hazard</h4>
-        <div style="display: flex; align-items: center; margin-bottom: 5px;">
-            <!-- A gradient bar from low hazard (light blue) to high hazard (dark blue) -->
-            <div style="width: 200px; height: 20px; 
-                        background: linear-gradient(to right, rgba(0,150,255,0.3), rgba(0,150,255,1));">
+        <!-- Flood section -->
+        <div id="flood-section" style="display: none;">
+            <h5 style="margin-top:0; margin-bottom: 5px;">Flood Hazard</h5>
+            <div style="display: flex; align-items: center; margin-bottom: 5px;">
+                <div style="width: 200px; height: 20px; 
+                          background: linear-gradient(to right, rgba(0,150,255,0.3), rgba(0,150,255,1));">
+                </div>
             </div>
-        </div>
-        <div style="display: flex; justify-content: space-between; width: 200px;">
-            <span>Low</span>
-            <span>High</span>
+            <div style="display: flex; justify-content: space-between; width: 200px;">
+                <span>Low</span>
+                <span>High</span>
+            </div>
         </div>
     </div>
     """
 
-    # Define the JavaScript that shows/hides these legends depending on which overlay is active
+    # Define the JavaScript that shows/hides the appropriate legend sections
     legend_script = """
     <script>
         var map = document.querySelector('.folium-map').map;
@@ -608,47 +659,52 @@ def generate_webmap():
         var femaLayer = document.querySelector('img[alt="FEMA Floodmap"]');
         var stormLayer = document.querySelector('img[alt="2080 Stormwater Flooding"]');
         
-        var heatLegend = document.getElementById('heat-legend');
-        var floodLegend = document.getElementById('flood-legend');
+        var unifiedLegend = document.getElementById('unified-legend');
+        var tempSection = document.getElementById('temp-section');
+        var floodSection = document.getElementById('flood-section');
         
-        function updateLegends() {
-            // If the heat layer is visible, show the heat legend; hide the flood legend
+        function updateLegend() {
+            var showTemp = false;
+            var showFlood = false;
+            
+            // Check if heat layer is visible
             if (heatLayer && map.hasLayer(heatLayer._layer) && 
                 window.getComputedStyle(heatLayer).opacity > 0 && 
                 window.getComputedStyle(heatLayer).display !== 'none') {
-                heatLegend.style.display = 'block';
-                floodLegend.style.display = 'none';
+                showTemp = true;
             }
-            // If the FEMA or stormwater layer is visible, show the flood legend; hide the heat legend
-            else if ((femaLayer && map.hasLayer(femaLayer._layer) && 
-                      window.getComputedStyle(femaLayer).opacity > 0 && 
-                      window.getComputedStyle(femaLayer).display !== 'none') ||
-                     (stormLayer && map.hasLayer(stormLayer._layer) && 
-                      window.getComputedStyle(stormLayer).opacity > 0 && 
-                      window.getComputedStyle(stormLayer).display !== 'none')) {
-                floodLegend.style.display = 'block';
-                heatLegend.style.display = 'none';
+            
+            // Check if flood layers are visible
+            if ((femaLayer && map.hasLayer(femaLayer._layer) && 
+                 window.getComputedStyle(femaLayer).opacity > 0 && 
+                 window.getComputedStyle(femaLayer).display !== 'none') ||
+                (stormLayer && map.hasLayer(stormLayer._layer) && 
+                 window.getComputedStyle(stormLayer).opacity > 0 && 
+                 window.getComputedStyle(stormLayer).display !== 'none')) {
+                showFlood = true;
             }
-            // Otherwise, hide both
-            else {
-                heatLegend.style.display = 'none';
-                floodLegend.style.display = 'none';
-            }
+            
+            // Show/hide the appropriate sections
+            tempSection.style.display = showTemp ? 'block' : 'none';
+            floodSection.style.display = showFlood ? 'block' : 'none';
+            
+            // Show/hide the entire legend if no sections are visible
+            unifiedLegend.style.display = (showTemp || showFlood) ? 'block' : 'none';
         }
         
         // Update the legend whenever layers are toggled or map zoom changes
-        map.on('overlayadd', updateLegends);
-        map.on('overlayremove', updateLegends);
-        map.on('zoomend', updateLegends);
+        map.on('overlayadd', updateLegend);
+        map.on('overlayremove', updateLegend);
+        map.on('zoomend', updateLegend);
         
         // Initial check (slight delay to ensure layers have rendered)
-        setTimeout(updateLegends, 1000);
+        setTimeout(updateLegend, 1000);
     </script>
     """
 
     # Add the legend HTML + script to the map
     m.get_root().html.add_child(folium.Element(legend_html + legend_script))
-    
+
     # Save map
     m.save(OUTPUT_WEBMAP)
     print("Webmap generated and saved to:", OUTPUT_WEBMAP)

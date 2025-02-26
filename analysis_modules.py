@@ -172,7 +172,7 @@ def aggregate_cap_proj_to_parks(parks_gdf, cap_joined, config):
     return merged
 
 # ---------------------------
-# Raster-Based Calculations
+# Heat Analysis Functions
 # ---------------------------
 def kelvin_to_fahrenheit(K):
     return (K - 273.15) * 9/5 + 32
@@ -195,30 +195,42 @@ def extract_mean_temperature(site, raster_path):
     import rasterio
     from rasterio.windows import Window
     from shapely.geometry import box
+    
     geom = site.geometry
     if geom is None or geom.is_empty:
         return np.nan
-    centroid = geom.centroid
+    
+    # Change: Buffer the polygon directly instead of its centroid
     BUFFER = 2000.0  # using a 2000 ft buffer
-    xmin = centroid.x - BUFFER
-    xmax = centroid.x + BUFFER
-    ymin = centroid.y - BUFFER
-    ymax = centroid.y + BUFFER
+    buffer_geom = geom.buffer(BUFFER)
+    
+    # Get the bounds of the buffered geometry
+    xmin, ymin, xmax, ymax = buffer_geom.bounds
+    
     with rasterio.open(raster_path) as src:
+        # Convert bounds to pixel coordinates
         row_start, col_start = src.index(xmin, ymax)
         row_end, col_end = src.index(xmax, ymin)
+        
+        # Ensure rows and columns are in the correct order
         row_start, row_end = sorted([row_start, row_end])
         col_start, col_end = sorted([col_start, col_end])
+        
+        # Ensure coordinates are within raster boundaries
         row_start = max(row_start, 0)
         col_start = max(col_start, 0)
         row_end = min(row_end, src.height - 1)
         col_end = min(col_end, src.width - 1)
+        
         if row_end < row_start or col_end < col_start:
             return np.nan
+            
         window = Window(col_start, row_start, col_end - col_start + 1, row_end - row_start + 1)
         data = src.read(1, window=window, masked=True)
+        
         if data.size == 0:
             return np.nan
+            
         data_f = kelvin_to_fahrenheit(data)
         return float(data_f.mean())
 
@@ -267,15 +279,13 @@ def process_site_flood(args):
     from shapely.geometry import box
     geom = site.geometry
     if geom is None or geom.is_empty:
-        # Only provide nr fields now
         return idx, {
             'Cst_500_nr': 0.0, 'Cst_100_nr': 0.0,
             'StrmShl_nr': 0.0, 'StrmDp_nr': 0.0, 'StrmTid_nr': 0.0
         }
-    centroid = geom.centroid
-    # Use the buffer from config (buffer_dist)
-    circle_geom = centroid.buffer(buffer_dist)
-    minx, miny, maxx, maxy = circle_geom.bounds
+    # Change: Buffer the polygon directly instead of its centroid
+    buffer_geom = geom.buffer(buffer_dist)
+    minx, miny, maxx, maxy = buffer_geom.bounds
     bbox = (minx, miny, maxx, maxy)
     try:
         fema_arr, fema_transform = read_raster_window(fema_path, bbox, target_crs)
@@ -291,19 +301,18 @@ def process_site_flood(args):
     storm_arr = storm_arr[:min_height, :min_width]
     height, width = fema_arr.shape
     from rasterio import features
-    # “site_mask” uses the park polygon (for “inside” but now we won’t use these values)
     site_rast = features.rasterize([(geom, 1)], out_shape=(height, width),
                                     transform=fema_transform, fill=0, dtype=np.uint8)
-    circle_rast = features.rasterize([(circle_geom, 1)], out_shape=(height, width),
+    buffer_rast = features.rasterize([(buffer_geom, 1)], out_shape=(height, width),
                                       transform=fema_transform, fill=0, dtype=np.uint8)
-    circle_mask = (circle_rast == 1)
+    buffer_mask = (buffer_rast == 1)
     results = {}
-    for cval, ctag in {1: '500', 2: '100'}.items():
-        nr_match = ((circle_mask) & (fema_arr == cval)).sum() if circle_mask.sum() > 0 else 0
-        results[f"Cst_{ctag}_nr"] = nr_match / circle_mask.sum() if circle_mask.sum() else 0.0
-    for sval, stag in {1: 'Shl', 2: 'Dp', 3: 'Tid'}.items():
-        nr_match = ((circle_mask) & (storm_arr == sval)).sum() if circle_mask.sum() > 0 else 0
-        results[f"Strm{stag}_nr"] = nr_match / circle_mask.sum() if circle_mask.sum() else 0.0
+    for cval, ctag in COAST_VALUES.items():
+        nr_match = ((buffer_mask) & (fema_arr == cval)).sum() if buffer_mask.sum() > 0 else 0
+        results[f"Cst_{ctag}_nr"] = nr_match / buffer_mask.sum() if buffer_mask.sum() else 0.0
+    for sval, stag in STORM_VALUES.items():
+        nr_match = ((buffer_mask) & (storm_arr == sval)).sum() if buffer_mask.sum() > 0 else 0
+        results[f"Strm{stag}_nr"] = nr_match / buffer_mask.sum() if buffer_mask.sum() else 0.0
     return idx, results
 
 def compute_raw_flood(gdf, config):
@@ -382,8 +391,7 @@ def compute_raw_heat_vulnerability(gdf, config):
         if geom is None or geom.is_empty:
             hvi_values.append(np.nan)
             continue
-        centroid = geom.centroid
-        buffer_geom = centroid.buffer(buffer_dist)
+        buffer_geom = geom.buffer(buffer_dist)
         possible_hvi = hvi.iloc[list(hvi_sindex.intersection(buffer_geom.bounds))]
         hvi_val = area_weighted_average(buffer_geom, possible_hvi, "HVI")
         hvi_values.append(hvi_val)
@@ -412,8 +420,7 @@ def compute_raw_flood_vulnerability(gdf, config):
             ss80_values.append(np.nan)
             tid80_values.append(np.nan)
             continue
-        centroid = geom.centroid
-        buffer_geom = centroid.buffer(buffer_dist)
+        buffer_geom = geom.buffer(buffer_dist)
         possible_fvi = fvi.iloc[list(fvi_sindex.intersection(buffer_geom.bounds))]
         ss80_val = area_weighted_average(buffer_geom, possible_fvi, "ss_80s")
         tid80_val = area_weighted_average(buffer_geom, possible_fvi, "tid_80s")
