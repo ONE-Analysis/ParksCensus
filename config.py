@@ -10,7 +10,7 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 PARKS_FILE = os.path.join(INPUT_DIR, "NYC_Parks.geojson")
 CAPITAL_PROJECTS_FILE = os.path.join(INPUT_DIR, "DPR_CapitalProjects.geojson")
 HEAT_FILE = os.path.join(INPUT_DIR, "Landsat9_ThermalComposite_ST_B10_2020-2023.tif")
-FEMA_RASTER = os.path.join(INPUT_DIR, "FEMA_FloodHaz_Raster.tif")
+FEMA_RASTER = os.path.join(INPUT_DIR, "FEMA_Flood.tif")
 STORM_RASTER = os.path.join(INPUT_DIR, "Stormwater2080_Raster.tif")
 HVI_DATA = os.path.join(INPUT_DIR, "HVI.geojson")
 FVI_DATA = os.path.join(INPUT_DIR, "FVI.geojson")
@@ -24,7 +24,7 @@ CRS = "EPSG:6539"
 
 # Analysis parameters
 ANALYSIS_BUFFER_FT = 2000       # buffer distance (in feet) for raster calculations
-RESOLUTION = 30                 # target raster resolution
+RESOLUTION = 10                 # target raster resolution
 
 # Cutoff date for CapitalProjects (only include projects completed on/after this date)
 cutoff_date_simple = "01/01/2018"
@@ -83,13 +83,77 @@ DATASET_INFO = {
         "concat_fields": ["Title", "Summary", "CurrentPha", "DesignPerc", "Procuremen", "Constructi", "Construc_4", "ProjectLia", "EstInvestment", "FundingSou"],
         "est_total_field": "EstInvTotal"
     },
+
     "Webmap": {
-        "2080_Stormwater": {"name": "2080 Stormwater Flooding", "hex": "#244489", "shallow_alpha": 0.5},
-        "FEMA_FloodHaz": {"name": "FEMA Floodmap", "hex_1pct": "#75E1FF", "hex_0_2pct": "#BEE7FF"},
-        "Summer_Temperature": {"name": "Summer Temperature", "color_ramp": {"start": "#C40A0A00", "end": "#C40A0A"}},
-        "NYC_Parks": {"name": "NYC Parks", "hex": "#328232"},
-        "Suitability": {"name": "Suitability", "color_ramp": {"start": "#efdb8b", "end": "#006400"}}
+        "2080_Stormwater": {
+            "name": "2080 Stormwater Flooding", 
+            "hex": "#244489", 
+            "color_ramp": {"start": "#91A1C4", "end": "#244489"},
+            "opacity": 0.6,
+            "description": "Stormwater Flooding: value 1 = shallow (lighter), value 2 = deep (darker)"
+        },
+        "FEMA_FloodHaz": {
+            "name": "FEMA Floodmap", 
+            "hex_1pct": "#75E1FF", 
+            "hex_0_2pct": "#BEE7FF",
+            "opacity": 0.6
+        },
+        "Summer_Temperature": {
+            "name": "Summer Temperature", 
+            "color_ramp": {"start": "#C40A0A00", "end": "#C40A0A"},
+            "opacity": 0.7
+        },
+        "NYC_Parks": {
+            "name": "NYC Parks", 
+            "hex": "#328232"
+        },
+        "Suitability": {
+            "name": "Suitability", 
+            "color_ramp": {"start": "#efdb8b", "end": "#006400"}
+        }
+    },
+    "Flood_Vulnerability_SS": {
+        "alias": "SS80s",
+        "name": "Flood Vulnerability – SS 80s",
+        "description": "Flood vulnerability based on ss_80s values (range 1: low to 5: high).",
+        "color_ramp": {
+            "start": "#C7E9F1",  # light blue for low vulnerability (1)
+            "end": "#08306B"     # dark blue for high vulnerability (5)
+        },
+        "opacity": 0.15
+    },
+    "Flood_Vulnerability_TID": {
+        "alias": "TID80s",
+        "name": "Flood Vulnerability – TID 80s",
+        "description": "Flood vulnerability based on tid_80s values (range 1: low to 5: high).",
+        "color_ramp": {
+            "start": "#FFF7BC",  # light yellow for low vulnerability (1)
+            "end": "#7F0000"     # dark red for high vulnerability (5)
+        },
+        "opacity": 0.15
+    },
+    "HVI": {
+        "alias": "HVI",
+        "name": "Heat Vulnerability Index",
+        "description": "Heat vulnerability index (range 1: low to 5: high).",
+        "color_ramp": {
+            "colors": ["#FEF0D9", "#FDBB84", "#FC8D59", "#E34A33", "#B30000"] # Must be 5 colors for HVI
+        },
+        "opacity": 0.3
+    },
+    "JENKS": {
+        "enabled": True,
+        "classes": 5
     }
+}
+
+LEGEND_STYLES = {
+    "container": "position: fixed; bottom: 50px; right: 50px; z-index:9999; background: white; padding: 15px; border-radius: 15px; font-family: Arial, sans-serif; box-shadow: 2px 2px 8px rgba(0, 0, 0, 0.3);",
+    "header": "margin-top:0; margin-bottom: 12px; font-size: 16px; font-weight: bold;",
+    "sectionHeader": "margin-top:10px; margin-bottom: 5px; font-size: 14px; font-weight: bold;",
+    "itemContainer": "display: flex; align-items: center; margin-bottom: 5px;",
+    "colorBox": "width: 20px; height: 20px; margin-right: 5px;",
+    "label": "font-size: 13px;"
 }
 
 # New weight dictionaries (all weights add to 1 within each index)
